@@ -1,0 +1,24 @@
+
+INVOICE
+
+Invoice Number: INV-2026-001
+Invoice Date: 02 November 2026
+
+Seller: ABC Technology Ltd.
+Buyer: XYZ Solutions
+
+Items:
+
+1. Website Development
+   Quantity: 1
+   Unit Price: 50000 BDT
+   Total: 50000 BDT
+
+2. Domain Registration
+   Quantity: 2
+   Unit Price: 1500 BDT
+   Total: 3000 BDT
+
+Subtotal: 53000 BDT
+Tax: 5000 BDT
+Grand Total: 58000 BDT

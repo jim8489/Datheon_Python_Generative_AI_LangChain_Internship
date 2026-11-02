@@ -1,0 +1,20 @@
+
+Muntasir Maruf Bosunia
+
+Computer Science and Engineering student
+at Begum Rokeya University, Rangpur.
+
+Technical Skills:
+Python, Django, JavaScript, HTML, CSS,
+Django REST Framework, Git and REST APIs.
+
+Research Interests:
+Biomedical Image Processing and Artificial Intelligence.
+
+Projects:
+Developed a Hall Management System using Django
+and a REST API-based E-commerce Backend.
+
+Education:
+Bachelor of Science in Computer Science and Engineering.
+Begum Rokeya University, Rangpur.

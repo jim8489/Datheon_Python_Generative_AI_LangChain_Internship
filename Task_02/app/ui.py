@@ -9,8 +9,8 @@ from app.services.rag_service import answer_question
 from app.services.vector_store import (
     add_documents_to_vector_store,
     list_indexed_sources,
+    get_indexed_chunk_count,
 )
-
 
 # --------------------------------------------------
 # Upload helper
@@ -399,10 +399,21 @@ if question:
 
                 else:
 
-                    st.caption(
-                        "No sufficiently relevant source chunks were found."
-                    )
+                   indexed_count = get_indexed_chunk_count(source_filter)
 
+                   if indexed_count == 0:
+
+                      st.warning(
+                        "No indexed chunks were found for the selected document. "
+                          "Please upload and index it again."
+                       )
+                   else:
+
+                      st.warning(
+                      f"The selected document contains {indexed_count} indexed "
+                      "chunks, but retrieval returned no candidates. "
+                      "Check the retrieval configuration and application logs."
+                    )
                 st.session_state.messages.append(
                     {
                         "role": "assistant",

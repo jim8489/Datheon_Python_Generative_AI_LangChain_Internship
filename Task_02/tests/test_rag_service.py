@@ -82,3 +82,20 @@ def test_no_retrieved_documents(monkeypatch):
 
     assert result["sources"] == []
     assert "could not find sufficient information" in result["answer"]
+    
+def test_sentence_excerpt_is_readable():
+
+    text = (
+        "Doomsday Ready helps MCU fans plan their rewatch "
+        "before Avengers: Doomsday. It also supports "
+        "opening-night watch-party bookings."
+    )
+
+    excerpt = rag_service.make_sentence_excerpt(
+        text,
+        max_chars=75,
+    )
+
+    assert excerpt.endswith(".")
+    assert "\n" not in excerpt
+    assert "Doomsday Ready helps MCU fans" in excerpt

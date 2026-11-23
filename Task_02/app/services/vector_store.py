@@ -1,5 +1,6 @@
-
 import hashlib
+import logging
+import math
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -10,6 +11,25 @@ from app.config import (
     MIN_RELEVANCE_SCORE,
 )
 from app.services.embedding_service import get_embedding_model
+
+
+logger = logging.getLogger(__name__)
+
+
+def squared_l2_relevance(distance: float) -> float:
+    """
+    Convert Chroma's squared L2 distance into a bounded
+    retrieval score between 0 and 1.
+
+    This conversion assumes normalized embeddings.
+    Our embedding service uses normalize_embeddings=True.
+    """
+
+    distance = max(float(distance), 0.0)
+
+    score = 1.0 - (math.sqrt(distance) / 2.0)
+
+    return max(0.0, min(1.0, score))
 
 
 def get_vector_store() -> Chroma:
@@ -27,9 +47,10 @@ def get_vector_store() -> Chroma:
 
 def generate_chunk_id(document: Document, index: int) -> str:
     source = document.metadata.get("source", "unknown")
+    page = document.metadata.get("page", "unknown")
     start_index = document.metadata.get("start_index", index)
 
-    unique_value = f"{source}:{start_index}:{index}"
+    unique_value = f"{source}:{page}:{start_index}:{index}"
 
     return hashlib.sha256(
         unique_value.encode("utf-8")
@@ -50,7 +71,7 @@ def add_documents_to_vector_store(
         for document in documents
     }
 
-    # Replace previously indexed chunks for the same source.
+    # Replace old chunks belonging to the same source.
     for source in sources:
 
         existing = vector_store.get(
@@ -73,14 +94,16 @@ def add_documents_to_vector_store(
         ids=ids,
     )
 
+    logger.info(
+        "Indexed %d chunks from %d document(s).",
+        len(documents),
+        len(sources),
+    )
+
     return len(documents)
 
 
 def list_indexed_sources() -> list[str]:
-    """
-    Return unique source filenames stored in ChromaDB.
-    """
-
     vector_store = get_vector_store()
 
     result = vector_store.get(
@@ -97,16 +120,43 @@ def list_indexed_sources() -> list[str]:
     return sorted(sources)
 
 
+def get_indexed_chunk_count(
+    source: str | None = None,
+) -> int:
+    """
+    Count indexed chunks, optionally restricted to one source.
+    """
+
+    vector_store = get_vector_store()
+
+    search_filter = (
+        {"source": source}
+        if source
+        else None
+    )
+
+    result = vector_store.get(
+        where=search_filter,
+        include=[],
+    )
+
+    return len(result.get("ids", []))
+
+
 def search_similar_documents(
     query: str,
-    k: int = 4,
+    k: int = 6,
     source: str | None = None,
 ) -> list[Document]:
     """
-    Retrieve relevant chunks and attach their relevance scores.
+    Retrieve the top matching document chunks.
 
-    If source is supplied, search only within that document.
-    Chunks below MIN_RELEVANCE_SCORE are rejected.
+    Uses raw Chroma distances and converts them ourselves,
+    avoiding LangChain's default relevance conversion.
+
+    The minimum score is configurable. Set it to 0.0 while
+    validating retrieval so potentially useful chunks are
+    not discarded prematurely.
     """
 
     if not query or not query.strip():
@@ -123,7 +173,7 @@ def search_similar_documents(
         else None
     )
 
-    results = vector_store.similarity_search_with_relevance_scores(
+    raw_results = vector_store.similarity_search_with_score(
         query=query.strip(),
         k=k,
         filter=search_filter,
@@ -131,17 +181,42 @@ def search_similar_documents(
 
     relevant_documents = []
 
-    for document, score in results:
+    for document, distance in raw_results:
 
-        score = float(score)
+        document_source = document.metadata.get("source")
+
+        # Defensive check: never return a different source
+        # when the user selected a specific document.
+        if source and document_source != source:
+            logger.warning(
+                "Ignoring unexpected source: %s",
+                document_source,
+            )
+            continue
+
+        score = squared_l2_relevance(distance)
 
         if score < MIN_RELEVANCE_SCORE:
             continue
 
-        # Store the score for citation transparency.
-        document.metadata["relevance_score"] = score
+        document.metadata["relevance_score"] = round(
+            score,
+            4,
+        )
+
+        document.metadata["vector_distance"] = round(
+            float(distance),
+            6,
+        )
 
         relevant_documents.append(document)
+
+    logger.info(
+        "Retrieval completed | source=%s | candidates=%d | accepted=%d",
+        source or "all documents",
+        len(raw_results),
+        len(relevant_documents),
+    )
 
     return relevant_documents
 

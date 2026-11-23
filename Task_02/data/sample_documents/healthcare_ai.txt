@@ -1,0 +1,27 @@
+Artificial Intelligence in Healthcare
+
+Artificial Intelligence is transforming modern healthcare by supporting
+medical professionals, improving clinical workflows, and analyzing
+complex medical data.
+
+Machine learning algorithms can identify patterns in patient records
+and support clinical decision-making.
+
+Deep learning models are particularly useful for analyzing medical
+images such as X-rays, CT scans, MRI scans, and histopathology images.
+
+Retrieval-Augmented Generation (RAG) combines information retrieval
+with a large language model. It retrieves relevant information from
+a collection of documents before generating an answer.
+
+Vector databases store numerical representations of text called
+embeddings. These embeddings allow systems to retrieve semantically
+relevant information rather than relying only on exact keyword matches.
+
+ChromaDB is an open-source vector database that stores embeddings
+and associated metadata. It can be used to build document-based
+question-answering applications.
+
+A reliable RAG system should generate answers using retrieved source
+documents. If the documents do not contain sufficient information,
+the system should clearly state that the answer is unavailable.

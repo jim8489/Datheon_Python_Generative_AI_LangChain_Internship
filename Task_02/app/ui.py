@@ -8,7 +8,7 @@ from app.services.chunking_service import split_documents
 from app.services.rag_service import answer_question
 from app.services.vector_store import (
     add_documents_to_vector_store,
-    list_indexed_sources,
+    list_indexed_documents,
     get_indexed_chunk_count,
 )
 
@@ -30,10 +30,10 @@ def load_document_from_upload(uploaded_file):
         temporary_path = Path(temporary_file.name)
 
     try:
-        documents = load_document(temporary_path)
-
-        for document in documents:
-            document.metadata["source"] = uploaded_file.name
+        documents = load_document(
+        temporary_path,
+        source_name=uploaded_file.name,
+    )
 
         return documents
 
@@ -207,20 +207,47 @@ with st.sidebar:
     st.divider()
 
     # Knowledge base section
+
+    # Knowledge base section
     st.subheader("Knowledge base")
 
     try:
-        indexed_sources = list_indexed_sources()
+        indexed_documents = list_indexed_documents()
 
     except Exception as error:
-        indexed_sources = []
+        indexed_documents = []
         st.error(f"Could not load indexed documents: {error}")
 
-    if indexed_sources:
+    # Count how many indexed documents share each filename.
+    filename_counts = {}
 
-        for filename in indexed_sources:
-            st.write(f"📄 {filename}")
+    for document in indexed_documents:
+        filename = document["source"]
+        filename_counts[filename] = (
+            filename_counts.get(filename, 0) + 1
+        )
 
+    # Create readable labels while retaining unique document IDs.
+    document_labels = {}
+
+    for document in indexed_documents:
+        document_id = document["document_id"]
+        filename = document["source"]
+
+        if filename_counts[filename] > 1:
+            label = f"{filename} ({document_id[:10]})"
+        else:
+            label = filename
+
+        if document.get("legacy"):
+            label += " [legacy]"
+
+        document_labels[document_id] = label
+
+    if indexed_documents:
+        for document in indexed_documents:
+            document_id = document["document_id"]
+            st.write(f"📄 {document_labels[document_id]}")
     else:
         st.caption("No documents indexed yet.")
 
@@ -229,28 +256,39 @@ with st.sidebar:
     # Document selection
     st.subheader("Search settings")
 
-    document_options = [
-        "All documents"
-    ] + indexed_sources
+    document_options = (
+        [None]
+        + [
+            document["document_id"]
+            for document in indexed_documents
+        ]
+    )
 
-    selected_document = st.selectbox(
+    selected_document_id = st.selectbox(
         "Search within",
         options=document_options,
+        format_func=lambda value: (
+            "All documents"
+            if value is None
+            else document_labels[value]
+        ),
         help=(
             "Select one document to restrict retrieval, "
             "or choose All documents."
         ),
     )
 
-    source_filter = (
-        selected_document
-        if selected_document != "All documents"
-        else None
+    selected_document = (
+        "All documents"
+        if selected_document_id is None
+        else document_labels[selected_document_id]
     )
 
-    st.caption(
-        "Selected: " + selected_document
-    )
+    # This ID is passed to the vector store and RAG service.
+    source_filter = selected_document_id
+
+    st.caption("Selected: " + selected_document)
+
 
     st.divider()
 

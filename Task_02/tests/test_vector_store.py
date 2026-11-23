@@ -106,14 +106,20 @@ def test_selected_document_filter(isolated_vector_store):
                 "The assessment asks candidates to build "
                 "a full-stack application."
             ),
-            metadata={"source": "blinto-assessment.pdf"},
+            metadata={
+                "source": "report.pdf",
+                "document_id": "assessment-document-id",
+            },
         ),
         Document(
             page_content=(
                 "The research study investigates thyroid "
                 "classification using machine learning."
             ),
-            metadata={"source": "thyroid-study.pdf"},
+            metadata={
+                "source": "report.pdf",
+                "document_id": "thyroid-document-id",
+            },
         ),
     ]
 
@@ -122,20 +128,19 @@ def test_selected_document_filter(isolated_vector_store):
     results = search_similar_documents(
         query="What should the candidate build?",
         k=6,
-        source="blinto-assessment.pdf",
+        source="assessment-document-id",
     )
 
     assert results
 
     assert all(
-        document.metadata["source"] == "blinto-assessment.pdf"
+        document.metadata["document_id"] == "assessment-document-id"
         for document in results
     )
 
     assert get_indexed_chunk_count(
-        "blinto-assessment.pdf"
+        "assessment-document-id"
     ) == 1
-
 
 def test_unknown_document_returns_no_results(isolated_vector_store):
 
@@ -152,3 +157,167 @@ def test_unknown_document_returns_no_results(isolated_vector_store):
     )
 
     assert results == []
+
+
+class FakeVectorStore:
+    """Minimal Chroma substitute for testing document replacement."""
+
+    def __init__(self):
+        self.records = {}
+        self.fail_on_add = False
+
+    def get(self, where=None, include=None):
+        records = self.records
+
+        if where:
+            key, expected_value = next(iter(where.items()))
+
+            records = {
+                chunk_id: document
+                for chunk_id, document in records.items()
+                if document.metadata.get(key) == expected_value
+            }
+
+        return {"ids": list(records.keys())}
+
+    def add_documents(self, documents, ids):
+        for index, (document, chunk_id) in enumerate(zip(documents, ids)):
+            self.records[chunk_id] = document
+
+            # Simulate a failure after a partial insertion.
+            if self.fail_on_add and index == 0:
+                raise RuntimeError("Simulated Chroma insertion failure.")
+
+    def delete(self, ids):
+        for chunk_id in ids:
+            self.records.pop(chunk_id, None)
+
+
+def test_successful_document_replacement(monkeypatch):
+    fake_store = FakeVectorStore()
+
+    old_document = Document(
+        page_content="Old version of the assessment.",
+        metadata={"source": "assessment.pdf"},
+    )
+
+    fake_store.records["old-chunk-id"] = old_document
+
+    monkeypatch.setattr(
+        vector_store,
+        "get_vector_store",
+        lambda: fake_store,
+    )
+
+    new_document = Document(
+        page_content="Updated version of the assessment.",
+        metadata={"source": "assessment.pdf"},
+    )
+
+    count = add_documents_to_vector_store([new_document])
+
+    assert count == 1
+    assert "old-chunk-id" not in fake_store.records
+    assert len(fake_store.records) == 1
+
+    indexed_document = next(iter(fake_store.records.values()))
+
+    assert indexed_document.page_content == (
+        "Updated version of the assessment."
+    )
+
+
+def test_failed_replacement_preserves_old_documents(monkeypatch):
+    fake_store = FakeVectorStore()
+
+    old_document = Document(
+        page_content="Previously indexed assessment content.",
+        metadata={"source": "assessment.pdf"},
+    )
+
+    fake_store.records["old-chunk-id"] = old_document
+    fake_store.fail_on_add = True
+
+    monkeypatch.setattr(
+        vector_store,
+        "get_vector_store",
+        lambda: fake_store,
+    )
+
+    new_document = Document(
+        page_content="Replacement assessment content.",
+        metadata={"source": "assessment.pdf"},
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Simulated Chroma insertion failure",
+    ):
+        add_documents_to_vector_store([new_document])
+
+    # The previous document must still exist.
+    assert "old-chunk-id" in fake_store.records
+
+    assert (
+        fake_store.records["old-chunk-id"].page_content
+        == "Previously indexed assessment content."
+    )
+
+    # The partially inserted replacement must be cleaned up.
+    assert len(fake_store.records) == 1
+def test_duplicate_filenames_are_independent(isolated_vector_store):
+
+    documents = [
+        Document(
+            page_content=(
+                "The first report discusses artificial intelligence "
+                "in medical image analysis."
+            ),
+            metadata={
+                "source": "report.pdf",
+                "document_id": "medical-report-id",
+            },
+        ),
+        Document(
+            page_content=(
+                "The second report discusses Python programming "
+                "and software engineering."
+            ),
+            metadata={
+                "source": "report.pdf",
+                "document_id": "programming-report-id",
+            },
+        ),
+    ]
+
+    count = add_documents_to_vector_store(documents)
+
+    assert count == 2
+
+    assert get_indexed_chunk_count("medical-report-id") == 1
+    assert get_indexed_chunk_count("programming-report-id") == 1
+
+    medical_results = search_similar_documents(
+        query="What does the medical report discuss?",
+        source="medical-report-id",
+    )
+
+    programming_results = search_similar_documents(
+        query="What does the programming report discuss?",
+        source="programming-report-id",
+    )
+
+    assert medical_results
+    assert programming_results
+
+    assert all(
+        document.metadata["document_id"] == "medical-report-id"
+        for document in medical_results
+    )
+
+    assert all(
+        document.metadata["document_id"] == "programming-report-id"
+        for document in programming_results
+    )
+
+    assert get_indexed_chunk_count() == 2

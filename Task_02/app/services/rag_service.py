@@ -299,7 +299,8 @@ def answer_question(
     """
     Retrieve relevant document chunks and generate a grounded answer.
 
-    If source is supplied, retrieval is restricted to that document.
+    If source is supplied, it represents a document_id and retrieval
+    is restricted to that specific document.
     Gemini fallback is used if the primary model fails.
     """
 
@@ -342,7 +343,7 @@ def answer_question(
 Question:
 {question.strip()}
 
-Selected document:
+Selected document ID:
 {source if source else "All indexed documents"}
 
 Retrieved document context:

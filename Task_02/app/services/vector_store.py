@@ -1,6 +1,8 @@
+
 import hashlib
 import logging
 import math
+import uuid
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -17,18 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def squared_l2_relevance(distance: float) -> float:
-    """
-    Convert Chroma's squared L2 distance into a bounded
-    retrieval score between 0 and 1.
-
-    This conversion assumes normalized embeddings.
-    Our embedding service uses normalize_embeddings=True.
-    """
-
+    """Convert squared L2 distance into a bounded score between 0 and 1."""
     distance = max(float(distance), 0.0)
-
     score = 1.0 - (math.sqrt(distance) / 2.0)
-
     return max(0.0, min(1.0, score))
 
 
@@ -45,12 +38,63 @@ def get_vector_store() -> Chroma:
     )
 
 
-def generate_chunk_id(document: Document, index: int) -> str:
-    source = document.metadata.get("source", "unknown")
+def _legacy_document_id(source: str) -> str:
+    """
+    Provide a stable identity for older or manually created documents
+    that do not yet contain a document_id.
+    """
+    return f"legacy:{source}"
+
+
+def _ensure_document_id(document: Document) -> str:
+    """
+    Ensure every incoming chunk has a document_id.
+
+    Documents loaded through document_loader already have a content-based
+    ID. The legacy fallback preserves compatibility with older callers.
+    """
+    source = str(document.metadata.get("source", "unknown"))
+
+    document_id = document.metadata.get("document_id")
+
+    if not document_id:
+        document_id = _legacy_document_id(source)
+        document.metadata["document_id"] = document_id
+
+    return str(document_id)
+
+
+def _document_filter(document_id: str) -> dict:
+    """
+    Build the appropriate Chroma filter.
+
+    Legacy documents are identified by filename because their original
+    Chroma records may not contain document_id metadata.
+    """
+    if document_id.startswith("legacy:"):
+        return {
+            "source": document_id[len("legacy:"):]
+        }
+
+    return {
+        "document_id": document_id
+    }
+
+
+def generate_chunk_id(
+    document: Document,
+    index: int,
+    batch_id: str | None = None,
+) -> str:
+    document_id = _ensure_document_id(document)
+
     page = document.metadata.get("page", "unknown")
     start_index = document.metadata.get("start_index", index)
 
-    unique_value = f"{source}:{page}:{start_index}:{index}"
+    unique_value = (
+        f"{batch_id or 'default'}:"
+        f"{document_id}:{page}:{start_index}:{index}"
+    )
 
     return hashlib.sha256(
         unique_value.encode("utf-8")
@@ -60,77 +104,161 @@ def generate_chunk_id(document: Document, index: int) -> str:
 def add_documents_to_vector_store(
     documents: list[Document],
 ) -> int:
+    """
+    Index document chunks.
 
+    Replacement is performed by document_id, not filename.
+    New chunks are inserted before old chunks are deleted, preserving
+    the previous version if insertion fails.
+    """
     if not documents:
         raise ValueError("No document chunks provided.")
 
     vector_store = get_vector_store()
 
-    sources = {
-        str(document.metadata.get("source", "unknown"))
+    document_ids = {
+        _ensure_document_id(document)
         for document in documents
     }
 
-    # Replace old chunks belonging to the same source.
-    for source in sources:
+    old_ids_by_document = {}
 
+    # Find existing chunks belonging to these exact documents.
+    for document_id in document_ids:
         existing = vector_store.get(
-            where={"source": source},
+            where=_document_filter(document_id),
             include=[],
         )
 
-        existing_ids = existing.get("ids", [])
+        old_ids_by_document[document_id] = existing.get("ids", [])
 
-        if existing_ids:
-            vector_store.delete(ids=existing_ids)
+    batch_id = uuid.uuid4().hex
 
-    ids = [
-        generate_chunk_id(document, index)
+    new_ids = [
+        generate_chunk_id(document, index, batch_id)
         for index, document in enumerate(documents)
     ]
 
-    vector_store.add_documents(
-        documents=documents,
-        ids=ids,
-    )
+    # Insert new chunks before deleting the old version.
+    try:
+        vector_store.add_documents(
+            documents=documents,
+            ids=new_ids,
+        )
+
+    except Exception:
+        try:
+            vector_store.delete(ids=new_ids)
+        except Exception:
+            logger.exception(
+                "Could not clean up partially inserted chunks."
+            )
+
+        logger.exception(
+            "Failed to index replacement documents. "
+            "Existing indexed data has been preserved."
+        )
+        raise
+
+    # Delete old chunks only after successful insertion.
+    for document_id, old_ids in old_ids_by_document.items():
+        if not old_ids:
+            continue
+
+        try:
+            vector_store.delete(ids=old_ids)
+
+        except Exception:
+            logger.exception(
+                "New chunks were indexed, but old chunks for "
+                "document '%s' could not be removed.",
+                document_id,
+            )
 
     logger.info(
         "Indexed %d chunks from %d document(s).",
         len(documents),
-        len(sources),
+        len(document_ids),
     )
 
     return len(documents)
 
 
-def list_indexed_sources() -> list[str]:
+def list_indexed_documents() -> list[dict]:
+    """
+    Return unique indexed documents.
+
+    Each item contains:
+        document_id
+        source
+        legacy
+    """
     vector_store = get_vector_store()
 
     result = vector_store.get(
         include=["metadatas"],
     )
 
-    sources = set()
+    indexed_documents = {}
 
     for metadata in result.get("metadatas", []) or []:
+        if not metadata:
+            continue
 
-        if metadata and metadata.get("source"):
-            sources.add(str(metadata["source"]))
+        source = metadata.get("source")
 
-    return sorted(sources)
+        if not source:
+            continue
+
+        source = str(source)
+
+        document_id = metadata.get("document_id")
+
+        legacy = not bool(document_id)
+
+        if legacy:
+            document_id = _legacy_document_id(source)
+
+        document_id = str(document_id)
+
+        indexed_documents[document_id] = {
+            "document_id": document_id,
+            "source": source,
+            "legacy": legacy,
+        }
+
+    return sorted(
+        indexed_documents.values(),
+        key=lambda item: (
+            item["source"].lower(),
+            item["document_id"],
+        ),
+    )
+
+
+def list_indexed_sources() -> list[str]:
+    """
+    Backward-compatible helper returning unique filenames.
+    """
+    return sorted({
+        document["source"]
+        for document in list_indexed_documents()
+    })
 
 
 def get_indexed_chunk_count(
     source: str | None = None,
 ) -> int:
     """
-    Count indexed chunks, optionally restricted to one source.
-    """
+    Count indexed chunks.
 
+    The source argument now accepts a document_id.
+    None means all indexed chunks.
+    """
     vector_store = get_vector_store()
 
     search_filter = (
-        {"source": source}
+        _document_filter(source)
         if source
         else None
     )
@@ -149,16 +277,10 @@ def search_similar_documents(
     source: str | None = None,
 ) -> list[Document]:
     """
-    Retrieve the top matching document chunks.
+    Retrieve relevant chunks.
 
-    Uses raw Chroma distances and converts them ourselves,
-    avoiding LangChain's default relevance conversion.
-
-    The minimum score is configurable. Set it to 0.0 while
-    validating retrieval so potentially useful chunks are
-    not discarded prematurely.
+    The source argument accepts a document_id, not a filename.
     """
-
     if not query or not query.strip():
         raise ValueError("Search query cannot be empty.")
 
@@ -168,7 +290,7 @@ def search_similar_documents(
     vector_store = get_vector_store()
 
     search_filter = (
-        {"source": source}
+        _document_filter(source)
         if source
         else None
     )
@@ -182,28 +304,33 @@ def search_similar_documents(
     relevant_documents = []
 
     for document, distance in raw_results:
-
-        document_source = document.metadata.get("source")
-
-        # Defensive check: never return a different source
-        # when the user selected a specific document.
-        if source and document_source != source:
-            logger.warning(
-                "Ignoring unexpected source: %s",
-                document_source,
+        if source:
+            expected_source = (
+                source[len("legacy:"):]
+                if source.startswith("legacy:")
+                else None
             )
-            continue
+
+            actual_document_id = document.metadata.get("document_id")
+            actual_source = document.metadata.get("source")
+
+            if expected_source is not None:
+                # Supports old records without document_id.
+                if actual_source != expected_source:
+                    continue
+            elif actual_document_id != source:
+                logger.warning(
+                    "Ignoring unexpected document ID: %s",
+                    actual_document_id,
+                )
+                continue
 
         score = squared_l2_relevance(distance)
 
         if score < MIN_RELEVANCE_SCORE:
             continue
 
-        document.metadata["relevance_score"] = round(
-            score,
-            4,
-        )
-
+        document.metadata["relevance_score"] = round(score, 4)
         document.metadata["vector_distance"] = round(
             float(distance),
             6,
@@ -212,7 +339,7 @@ def search_similar_documents(
         relevant_documents.append(document)
 
     logger.info(
-        "Retrieval completed | source=%s | candidates=%d | accepted=%d",
+        "Retrieval completed | document_id=%s | candidates=%d | accepted=%d",
         source or "all documents",
         len(raw_results),
         len(relevant_documents),
@@ -225,7 +352,6 @@ def clear_vector_store() -> None:
     vector_store = get_vector_store()
 
     existing = vector_store.get(include=[])
-
     ids = existing.get("ids", [])
 
     if ids:

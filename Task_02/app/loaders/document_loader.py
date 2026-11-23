@@ -1,4 +1,5 @@
 
+import hashlib
 import re
 import unicodedata
 from pathlib import Path
@@ -8,6 +9,19 @@ from langchain_community.document_loaders import PyPDFLoader
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".txt"}
+def generate_document_id(
+    filename: str,
+    file_content: bytes,
+) -> str:
+    filename_bytes = filename.encode("utf-8")
+
+    identity = (
+        len(filename_bytes).to_bytes(8, "big")
+        + filename_bytes
+        + file_content
+    )
+
+    return hashlib.sha256(identity).hexdigest()
 
 
 def normalize_pdf_text(text: str) -> str:

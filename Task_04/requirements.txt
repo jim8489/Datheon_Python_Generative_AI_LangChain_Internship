@@ -1,0 +1,3 @@
+# Task 4 deliberately reuses Task 2's LangChain, Gemini, Chroma, embedding,
+# Streamlit, dotenv, and pytest dependencies. Install from this folder.
+-r ../Task_02/requirements.txt

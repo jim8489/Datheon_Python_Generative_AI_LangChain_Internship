@@ -1,45 +1,38 @@
 # DocuMind — Document-Based Question Answering with RAG
 
-DocuMind is a Retrieval-Augmented Generation (RAG) application that allows users to upload PDF and TXT documents, build a searchable knowledge base, and ask questions about the uploaded content.
+DocuMind is a document-grounded question-answering application. Users upload PDF or TXT files, index their contents, and ask questions through a Streamlit interface. The application retrieves relevant passages from ChromaDB and supplies those passages to Google Gemini as evidence for an answer.
 
-Instead of relying only on the language model's general knowledge, DocuMind retrieves relevant passages from indexed documents and uses that context to generate answers. Retrieved information can be inspected through supporting source references.
-
-The application is built with Python, LangChain, Hugging Face sentence embeddings, ChromaDB, Google Gemini, and Streamlit.
+The project separates document loading, chunking, embedding generation, vector storage, retrieval, and answer generation into independent modules.
 
 ## Features
 
-- **Document upload:** Upload PDF and TXT documents through a Streamlit interface.
-- **PDF and TXT processing:** Extract text from supported documents before indexing.
-- **Text chunking:** Split document content into smaller, overlapping chunks for retrieval.
-- **Semantic embeddings:** Generate vector representations using `sentence-transformers/all-MiniLM-L6-v2`.
-- **Persistent vector storage:** Store document embeddings and metadata in ChromaDB.
-- **Retrieval-Augmented Generation:** Retrieve relevant document passages and provide them as context to Gemini.
-- **Document-specific search:** Ask questions across the entire knowledge base or restrict retrieval to one selected document.
-- **Duplicate filename support:** Index different documents even when they share the same filename.
-- **Stable document identity:** Generate document IDs from the original filename and file content.
-- **Safe re-indexing:** Re-indexing a document replaces its existing chunks without removing unrelated documents.
-- **Source references:** Display supporting document information with generated answers.
-- **Configurable retrieval:** Adjust chunk size, overlap, retrieval count, and relevance settings through environment variables.
-- **Automated testing:** Test document loading, chunking, vector storage, and RAG behavior with Pytest.
+- Upload PDF and TXT documents from the Streamlit interface.
+- Extract text and preserve source filename and PDF page metadata.
+- Normalize common PDF line-break artifacts while retaining paragraph boundaries.
+- Split documents into overlapping chunks.
+- Generate local semantic embeddings with `sentence-transformers/all-MiniLM-L6-v2`.
+- Store chunks and metadata in persistent ChromaDB storage.
+- Search the complete knowledge base or restrict retrieval to one selected document.
+- Display source references, page numbers, relevance scores, and readable excerpts.
+- Re-index a document without intentionally removing unrelated documents.
+- Support duplicate filenames by identifying a document using both its original filename and file bytes.
+- Run the ingestion and question-answering pipeline from either the Streamlit interface or CLI.
 
-## Technology Stack
+## Technology stack
 
 | Technology | Purpose |
 |---|---|
-| Python 3.11+ | Core programming language |
-| LangChain | RAG pipeline and component integration |
-| Google Gemini | Context-based answer generation |
-| `langchain-google-genai` | Gemini integration |
-| Hugging Face Sentence Transformers | Semantic embedding generation |
-| `all-MiniLM-L6-v2` | Text embedding model |
+| Python 3.11+ | Application runtime |
+| Streamlit | Upload and question-answering interface |
+| LangChain | Document, splitter, and RAG components |
+| Google Gemini | Context-grounded answer generation |
+| Hugging Face Sentence Transformers | Local semantic embeddings |
+| `all-MiniLM-L6-v2` | Embedding model |
 | ChromaDB | Persistent vector database |
-| `langchain-chroma` | LangChain integration with ChromaDB |
-| PyPDF | PDF text extraction |
-| Streamlit | Interactive web interface |
-| python-dotenv | Environment variable management |
-| Pytest | Automated testing |
+| PyPDF / PyPDFLoader | PDF text extraction |
+| Pytest | Automated tests |
 
-## Project Structure
+## Project structure
 
 ```text
 Task_02/
@@ -61,119 +54,74 @@ Task_02/
 │   ├── test_rag_service.py
 │   └── test_vector_store.py
 ├── data/
+│   └── sample_documents/
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
-## Architecture and Workflow
+## Architecture and workflow
 
-DocuMind follows a modular Retrieval-Augmented Generation workflow.
+1. **Ingestion:** The application reads a PDF or UTF-8 TXT file. Uploads retain the filename supplied by the user even though Streamlit temporarily stores the bytes in a temporary file.
+2. **Document identity:** The loader calculates a SHA-256 ID from the original filename and file bytes. The ID is attached to every page/chunk from that document.
+3. **Text normalization:** PDF text is normalized to join layout line breaks while preserving paragraph boundaries. PDF page numbers are converted to one-based numbering for display.
+4. **Chunking:** `RecursiveCharacterTextSplitter` creates overlapping chunks and carries source metadata forward.
+5. **Embedding:** The cached Hugging Face embedding model converts each chunk into a vector locally.
+6. **Indexing:** ChromaDB stores each chunk, its vector, and metadata. Re-indexing replaces chunks belonging to the same document ID after the new chunk batch is inserted.
+7. **Retrieval:** A question is embedded and matched against the complete collection or a selected document ID.
+8. **Generation:** Retrieved passages are formatted with citation IDs and sent to Gemini. The answer is displayed with source records so users can inspect the evidence.
 
-### 1. Document ingestion
+## Document identity and duplicate filenames
 
-Users upload PDF or TXT files through the Streamlit interface. The document loader extracts their text and preserves relevant metadata, including the original filename.
+A filename alone is not a reliable document identifier. Two different files may both be named `report.pdf`.
 
-### 2. Document identification
+DocuMind computes the ID using the original filename and the raw file bytes:
 
-Each newly indexed document receives a stable document ID generated using SHA-256 from its original filename and file content.
-
-This allows two different documents with the same filename to remain independently identifiable.
-
-### 3. Text chunking
-
-The extracted text is divided into smaller chunks with configurable overlap. Chunking helps the retrieval system identify relevant sections without processing an entire document as one large text block.
-
-### 4. Embedding generation
-
-The application uses the Hugging Face embedding model:
-
-`sentence-transformers/all-MiniLM-L6-v2`
-
-The model converts text chunks into numerical vector representations suitable for semantic similarity search.
-
-### 5. Vector storage
-
-The generated embeddings, document chunks, and associated metadata are stored in a persistent ChromaDB collection.
-
-### 6. Question retrieval
-
-When a user submits a question, the application searches the vector database for relevant chunks.
-
-Users can search across all indexed documents or select a particular document to restrict retrieval.
-
-### 7. Answer generation
-
-The retrieved passages are supplied as context to the configured Google Gemini model. Gemini generates an answer based on the retrieved information.
-
-The application also provides supporting source information so users can inspect the document context behind an answer.
-
-## Handling Duplicate Filenames
-
-A key improvement in DocuMind is its document identity mechanism.
-
-A filename alone is not sufficient to identify a document. For example, two users may upload different files named `report.pdf`.
-
-To avoid treating them as the same document, DocuMind generates a SHA-256 document ID using the original filename and file content.
-
-The resulting behavior is:
-
-- Different contents with the same filename receive different document IDs.
-- The same filename and content produce the same document ID.
-- Re-indexing an existing document replaces its previous chunks.
-- Re-indexing one document does not remove chunks belonging to another document.
-- Document selection and retrieval use document IDs rather than relying only on filenames.
-
-Older indexed records without document IDs are handled through a legacy compatibility mechanism. They remain identifiable using their available filename metadata.
-
-## Installation and Setup
-
-### 1. Clone the repository
-
-```bash
-git clone YOUR_GITHUB_REPOSITORY_URL
-cd Datheon_Python_GenAI_LangChain_Internship/Task_02
+```text
+SHA256(length(filename) + filename + file_bytes)
 ```
 
-Replace `YOUR_GITHUB_REPOSITORY_URL` with the actual repository URL.
+Consequences:
 
-### 2. Create a virtual environment
+- The same filename and same bytes produce the same ID.
+- Different contents with the same filename produce different IDs.
+- Streamlit uploads retain the original upload filename for identity and display.
+- CLI directory indexing uses the same production loader and identity logic.
+- Retrieval filters by document ID rather than filename, so documents with duplicate names remain independently selectable.
+- Older Chroma records without a `document_id` use a legacy filename-based fallback. Legacy records sharing a filename cannot be separated reliably until they are re-indexed through the current loader.
 
-macOS / Linux:
+## Installation
+
+Clone the repository and enter Task 02:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/jim8489/Datheon_Python_Generative_AI_LangChain_Internship.git
+cd Datheon_Python_Generative_AI_LangChain_Internship/Task_02
 ```
 
-Windows:
+Create an environment and install dependencies:
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-```
-
-### 3. Install dependencies
-
-```bash
+python3.11 -m venv .venv
+source .venv/bin/activate       # macOS / Linux
+# .venv\\Scripts\\activate      # Windows PowerShell
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
-
-Create a `.env` file in the `Task_02` directory using `.env.example` as a template.
+Create `.env` from the example:
 
 ```bash
 cp .env.example .env
 ```
 
-Configure the following values:
+Configure your Gemini API key and desired model:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3.5-flash-lite
+GEMINI_FALLBACK_MODEL=gemini-3.8-flash
 
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 
@@ -186,94 +134,84 @@ RETRIEVAL_K=6
 MIN_RELEVANCE_SCORE=0.0
 ```
 
-Replace the placeholder with a valid Gemini API key.
+Use model identifiers available to your Gemini API account. Never commit `.env` or expose the API key.
 
-**Security:** Never commit the `.env` file or expose API credentials publicly. The `.env.example` file contains configuration placeholders only.
+## Run the application
 
-## Running the Application
-
-From the `Task_02` directory, activate the virtual environment and run:
+From the `Task_02` directory, with the virtual environment activated:
 
 ```bash
 PYTHONPATH=. python -m streamlit run app/ui.py
 ```
 
-The Streamlit interface will be available at the local URL displayed in the terminal.
+Open the local URL printed by Streamlit.
 
-### Typical usage
+### Typical workflow
 
-1. Open the DocuMind application.
-2. Upload a PDF or TXT document.
-3. Allow the application to process and index the document.
-4. Select a specific indexed document or choose the entire knowledge base.
-5. Enter a question about the document content.
-6. Review the generated answer and its supporting source information.
+1. Upload one or more PDF/TXT files in the sidebar.
+2. Select **Index uploaded documents**.
+3. Wait for the per-file indexing process to finish.
+4. Select **All documents** or one indexed document under Search settings.
+5. Ask a question about the selected knowledge scope.
+6. Inspect the supporting source references beneath the answer.
 
-When selecting a specific document, retrieval is restricted to that document rather than the entire knowledge base.
+### CLI indexing and question answering
+
+Index every supported PDF/TXT file in a directory:
+
+```bash
+PYTHONPATH=. python -m app.main index --directory data/sample_documents
+```
+
+Ask a question:
+
+```bash
+PYTHONPATH=. python -m app.main ask --question "What is the main topic of the indexed documents?"
+```
 
 ## Configuration
 
-The following environment variables control the main application settings.
-
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | Required | Google Gemini API key |
-| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Answer-generation model |
-| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
-| `CHROMA_PERSIST_DIRECTORY` | `chroma_db` | Persistent vector database directory |
-| `CHROMA_COLLECTION_NAME` | `document_knowledge` | ChromaDB collection name |
-| `CHUNK_SIZE` | `1000` | Maximum configured chunk size |
+| `GEMINI_API_KEY` | Required | Gemini API key |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Primary generation model |
+| `GEMINI_FALLBACK_MODEL` | `gemini-3.8-flash` | Fallback generation model |
+| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model |
+| `CHROMA_PERSIST_DIRECTORY` | `chroma_db` | Persistent ChromaDB directory |
+| `CHROMA_COLLECTION_NAME` | `document_knowledge` | ChromaDB collection |
+| `CHUNK_SIZE` | `1000` | Maximum chunk size |
 | `CHUNK_OVERLAP` | `200` | Overlap between adjacent chunks |
-| `RETRIEVAL_K` | `6` | Number of relevant chunks to retrieve |
-| `MIN_RELEVANCE_SCORE` | `0.0` | Configured minimum relevance threshold |
+| `RETRIEVAL_K` | `6` | Maximum passages requested from retrieval |
+| `MIN_RELEVANCE_SCORE` | `0.0` | Minimum normalized relevance score accepted |
 
-## Running Tests
+The relevance score is a normalized display/filtering heuristic derived from the vector distance; it is not a calibrated probability that a passage supports an answer.
 
-The project includes automated tests for its main application components.
+## Tests
 
-From the `Task_02` directory, run:
+Run from `Task_02`:
 
 ```bash
-PYTHONPATH=. python -m pytest -v
+PYTHONPATH=. python -m pytest tests/ -v
 ```
 
-The test suite covers:
+The loader tests import the production loader and cover document identity, duplicate filenames, Streamlit's `source_name` upload path, directory/CLI indexing, normalization, and invalid files. Other tests cover chunking, RAG answer formatting, vector retrieval, document-level filters, and replacement behavior.
 
-- Document loading and validation.
-- Document metadata and stable identity generation.
-- Text chunking behavior.
-- Vector database indexing and retrieval.
-- Document-specific retrieval.
-- Handling of documents with duplicate filenames.
-- Safe document replacement and preservation of unrelated indexed documents.
-- RAG service behavior.
+The unit tests do not require live Gemini calls. The vector-store embedding test uses the configured Hugging Face model locally; the first run may download model files and requires sufficient memory and disk space.
 
-Tests should be run from the `Task_02` directory with the project root on `PYTHONPATH` so that application modules can be imported consistently.
+## Limitations and security notes
 
-## Design Considerations
+- Scanned/image-only PDFs need OCR; OCR is not included.
+- Retrieval and answer quality depend on extraction quality, chunking, embedding similarity, and the content of the indexed documents.
+- Citation ID validation confirms that a citation identifier came from the retrieved source list; it does not independently prove that every cited passage entails the associated claim.
+- Gemini requests require a working API key, network access, quota, and supported model identifiers.
+- Uploaded document text is treated as untrusted evidence, not as instructions to follow.
+- The default application is a local/single-instance demonstration, not a hardened multi-tenant document service. Add authentication, upload limits, access controls, and operational monitoring before handling private or regulated documents.
 
-- **Modularity:** Document loading, chunking, embedding, vector storage, and answer generation are separated into dedicated modules.
-- **Persistent storage:** ChromaDB retains indexed data between application sessions.
-- **Document isolation:** Stable document IDs prevent filename collisions from mixing distinct documents.
-- **Safe replacement:** New chunks are inserted before old chunks for the same document are removed, reducing the risk of losing existing indexed content during a failed replacement.
-- **Configurable behavior:** Important retrieval and processing settings are managed through environment variables.
-- **Context-based answers:** Retrieved document passages provide the context for Gemini responses.
-- **Legacy compatibility:** Existing records without document IDs are supported through filename-based fallback handling.
+## AI development disclosure
 
-## Limitations
+Google Gemini is used at runtime to generate answers from retrieved document context. ChatGPT was used as a development assistant for implementation planning, debugging discussion, test ideas, and documentation review. The developer remains responsible for reviewing, running, and validating the submitted code.
 
-- Answer quality depends on the quality and completeness of the uploaded document text and the retrieved context.
-- Scanned PDFs that contain only images may require OCR before their contents can be searched.
-- Gemini API access requires a valid API key and may be subject to API quotas or service availability.
-- The application is designed for document-based question answering; generated answers should be checked against the supporting source material.
-
-## AI Tools and Development Disclosure
-
-Google Gemini is used as the language model for generating answers from retrieved document context.
-
-AI assistance was also used during development for implementation guidance, debugging, test development, and documentation. The application architecture, integration, and testing were reviewed and refined as part of the development process.
-
-## Internship Project
+---
 
 **Program:** Datheon Python + Generative AI & LangChain Internship  
 **Task:** Task 02 — DocuMind: Document-Based Question Answering with RAG

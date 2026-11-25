@@ -7,8 +7,10 @@ import logging
 import re
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 from core.exceptions import ConversationOwnershipError, ConversationStoreError
 
@@ -17,10 +19,12 @@ _BROWSER_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 class SQLiteConversationStore:
-    """Persist chat history with every query scoped to a signed browser identity.
+    """Persist chat history scoped to a signed anonymous browser identity.
 
-    The store uses one short-lived connection per operation, foreign keys, WAL,
-    and a busy timeout so multiple Streamlit sessions can safely share one file.
+    Each operation uses a short-lived connection. WAL and a busy timeout help
+    separate Streamlit sessions share the same local SQLite database. Calls
+    that supply ``previous_state`` use incremental, baseline-aware persistence
+    so stale tabs cannot replace messages written by another tab.
     """
 
     def __init__(self, database_path: str | Path):
@@ -117,11 +121,33 @@ class SQLiteConversationStore:
             (browser_id, now, now),
         )
 
-    def load_browser_state(self, browser_id: str) -> dict[str, Any]:
-        """Load only the conversations owned by one browser identity."""
-        self._validate_browser_id(browser_id)
-        from datetime import datetime, timezone
+    @staticmethod
+    def _message_ids(conversation: Any) -> set[str]:
+        if not isinstance(conversation, Mapping):
+            return set()
+        messages = conversation.get("messages", [])
+        if not isinstance(messages, list):
+            return set()
+        return {
+            str(message["id"])
+            for message in messages
+            if isinstance(message, Mapping) and message.get("id")
+        }
 
+    @staticmethod
+    def _serialize_sources(message: Mapping[str, Any]) -> str:
+        sources = message.get("sources", [])
+        if not isinstance(sources, list):
+            sources = []
+        try:
+            return json.dumps(sources, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            logger.warning("Could not serialize source metadata; saving message without sources.")
+            return "[]"
+
+    def load_browser_state(self, browser_id: str) -> dict[str, Any]:
+        """Load only conversations owned by the supplied browser identity."""
+        self._validate_browser_id(browser_id)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with self._connection() as connection:
@@ -159,7 +185,10 @@ class SQLiteConversationStore:
                             if not isinstance(sources, list):
                                 sources = []
                         except (TypeError, json.JSONDecodeError):
-                            logger.warning("Ignoring malformed source metadata for message %s", message["id"])
+                            logger.warning(
+                                "Ignoring malformed source metadata for message %s",
+                                message["id"],
+                            )
                             sources = []
 
                         conversations[message["conversation_id"]]["messages"].append(
@@ -185,15 +214,41 @@ class SQLiteConversationStore:
                     "active_conversation_id": active_id,
                 }
         except sqlite3.Error as exc:
-            raise ConversationStoreError("Could not load this browser's conversation history.") from exc
+            raise ConversationStoreError(
+                "Could not load this browser's conversation history."
+            ) from exc
 
-    def save_browser_state(self, browser_id: str, state: Mapping[str, Any]) -> None:
-        """Atomically save the current browser state and remove deleted chats."""
+    def save_browser_state(
+        self,
+        browser_id: str,
+        state: Mapping[str, Any],
+        previous_state: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist browser state.
+
+        Without ``previous_state`` this retains the original full-snapshot
+        behavior for compatibility with existing callers. Streamlit sessions
+        should pass the state snapshot that was last saved by that tab. The
+        incremental mode writes only additions and deletions relative to that
+        baseline; it never re-inserts baseline messages missing from SQLite.
+        """
         self._validate_browser_id(browser_id)
         conversations = state.get("conversations")
-        if not isinstance(conversations, dict) or not conversations:
+        if not isinstance(conversations, Mapping) or not conversations:
             raise ConversationStoreError("At least one conversation is required for persistence.")
 
+        if previous_state is None:
+            self._save_full_snapshot(browser_id, state, conversations)
+        else:
+            self._save_incremental(browser_id, state, conversations, previous_state)
+
+    def _save_full_snapshot(
+        self,
+        browser_id: str,
+        state: Mapping[str, Any],
+        conversations: Mapping[str, Any],
+    ) -> None:
+        """Compatibility path: replace all stored conversations with snapshot."""
         active_id = state.get("active_conversation_id")
         if active_id not in conversations:
             active_id = max(
@@ -201,14 +256,15 @@ class SQLiteConversationStore:
                 key=lambda key: conversations[key].get("updated_at", ""),
             )
 
-        from datetime import datetime, timezone
-
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 self._ensure_profile(connection, browser_id, now)
 
                 for key, conversation in conversations.items():
+                    if not isinstance(conversation, Mapping):
+                        raise ConversationStoreError("Conversation data must be a mapping.")
                     conversation_id = str(conversation.get("id", key))
                     if conversation_id != str(key):
                         raise ConversationStoreError("Conversation map key does not match its ID.")
@@ -238,37 +294,32 @@ class SQLiteConversationStore:
                         "DELETE FROM messages WHERE conversation_id = ?",
                         (conversation_id,),
                     )
-                    for ordinal, message in enumerate(conversation.get("messages", [])):
+                    messages = conversation.get("messages", [])
+                    if not isinstance(messages, list):
+                        messages = []
+                    for ordinal, message in enumerate(messages):
+                        if not isinstance(message, Mapping):
+                            continue
                         role = message.get("role")
                         content = message.get("content")
                         if role not in {"user", "assistant"} or not isinstance(content, str):
                             continue
-                        try:
-                            sources_json = json.dumps(
-                                message.get("sources", []),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            )
-                        except (TypeError, ValueError):
-                            logger.warning("Could not serialize source metadata; saving message without sources.")
-                            sources_json = "[]"
-
                         connection.execute(
                             """INSERT INTO messages
                                (id, conversation_id, ordinal, role, content, sources_json, created_at)
                                VALUES (?, ?, ?, ?, ?, ?, ?)""",
                             (
-                                str(message.get("id", f"{conversation_id}-{ordinal}")),
+                                str(message.get("id") or uuid4().hex),
                                 conversation_id,
                                 ordinal,
                                 role,
                                 content,
-                                sources_json,
+                                self._serialize_sources(message),
                                 str(message.get("created_at", now)),
                             ),
                         )
 
-                retained_ids = set(conversations)
+                retained_ids = {str(key) for key in conversations}
                 existing_rows = connection.execute(
                     "SELECT id FROM conversations WHERE browser_id = ?",
                     (browser_id,),
@@ -291,4 +342,185 @@ class SQLiteConversationStore:
         except sqlite3.IntegrityError as exc:
             raise ConversationStoreError("Conversation data failed database validation.") from exc
         except sqlite3.Error as exc:
-            raise ConversationStoreError("Could not save this browser's conversation history.") from exc
+            raise ConversationStoreError(
+                "Could not save this browser's conversation history."
+            ) from exc
+
+    def _save_incremental(
+        self,
+        browser_id: str,
+        state: Mapping[str, Any],
+        conversations: Mapping[str, Any],
+        previous_state: Mapping[str, Any],
+    ) -> None:
+        """Merge this tab's changes without replacing data from other tabs.
+
+        The baseline represents only what this Streamlit tab last saved or
+        loaded. New records created by other tabs are therefore not treated as
+        deletions when this tab submits an older in-memory conversation list.
+        A baseline conversation/message that has already disappeared from the
+        database is not resurrected by a stale tab.
+        """
+        previous_conversations = previous_state.get("conversations", {})
+        if not isinstance(previous_conversations, Mapping):
+            previous_conversations = {}
+
+        current_ids = {str(key) for key in conversations}
+        previous_ids = {str(key) for key in previous_conversations}
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        try:
+            with self._connection() as connection:
+                # Serializes writers before the delta is calculated/applied.
+                connection.execute("BEGIN IMMEDIATE")
+                self._ensure_profile(connection, browser_id, now)
+
+                # Delete only conversations this tab knew about and explicitly removed.
+                for conversation_id in previous_ids - current_ids:
+                    connection.execute(
+                        "DELETE FROM conversations WHERE id = ? AND browser_id = ?",
+                        (conversation_id, browser_id),
+                    )
+
+                for key, conversation in conversations.items():
+                    if not isinstance(conversation, Mapping):
+                        raise ConversationStoreError("Conversation data must be a mapping.")
+                    conversation_id = str(conversation.get("id", key))
+                    if conversation_id != str(key):
+                        raise ConversationStoreError("Conversation map key does not match its ID.")
+
+                    existing = connection.execute(
+                        "SELECT browser_id, updated_at FROM conversations WHERE id = ?",
+                        (conversation_id,),
+                    ).fetchone()
+
+                    if existing is not None and existing["browser_id"] != browser_id:
+                        raise ConversationOwnershipError(
+                            "This conversation does not belong to the current browser."
+                        )
+
+                    if existing is None:
+                        # An ID in the baseline was deleted by another tab/user
+                        # action. Do not recreate it from this stale snapshot.
+                        if conversation_id in previous_ids:
+                            continue
+                        connection.execute(
+                            """INSERT INTO conversations
+                               (id, browser_id, title, created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (
+                                conversation_id,
+                                browser_id,
+                                str(conversation.get("title", "New conversation")),
+                                str(conversation.get("created_at", now)),
+                                str(conversation.get("updated_at", now)),
+                            ),
+                        )
+                    else:
+                        incoming_updated = str(conversation.get("updated_at", now))
+                        # Do not let an older tab move the activity timestamp back.
+                        # Equal-second timestamps are accepted so a title update
+                        # made in the same clock second is not lost.
+                        connection.execute(
+                            """UPDATE conversations
+                               SET title = CASE WHEN ? >= updated_at THEN ? ELSE title END,
+                                   updated_at = CASE WHEN ? > updated_at THEN ? ELSE updated_at END
+                               WHERE id = ? AND browser_id = ?""",
+                            (
+                                incoming_updated,
+                                str(conversation.get("title", "New conversation")),
+                                incoming_updated,
+                                incoming_updated,
+                                conversation_id,
+                                browser_id,
+                            ),
+                        )
+
+                    previous_conversation = previous_conversations.get(conversation_id)
+                    if previous_conversation is None:
+                        previous_conversation = previous_conversations.get(key)
+                    baseline_message_ids = self._message_ids(previous_conversation)
+
+                    messages = conversation.get("messages", [])
+                    if not isinstance(messages, list):
+                        messages = []
+                    current_message_ids = {
+                        str(message.get("id"))
+                        for message in messages
+                        if isinstance(message, Mapping) and message.get("id")
+                    }
+
+                    # Clear operations delete only messages in this tab's baseline.
+                    for message_id in baseline_message_ids - current_message_ids:
+                        connection.execute(
+                            "DELETE FROM messages WHERE id = ? AND conversation_id = ?",
+                            (message_id, conversation_id),
+                        )
+
+                    # Existing baseline IDs are never reinserted. This prevents
+                    # stale tabs from resurrecting messages cleared elsewhere.
+                    next_ordinal_row = connection.execute(
+                        "SELECT COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal "
+                        "FROM messages WHERE conversation_id = ?",
+                        (conversation_id,),
+                    ).fetchone()
+                    next_ordinal = int(next_ordinal_row["next_ordinal"])
+
+                    for message in messages:
+                        if not isinstance(message, Mapping):
+                            continue
+                        message_id = str(message.get("id") or uuid4().hex)
+                        if message_id in baseline_message_ids:
+                            continue
+                        role = message.get("role")
+                        content = message.get("content")
+                        if role not in {"user", "assistant"} or not isinstance(content, str):
+                            continue
+
+                        cursor = connection.execute(
+                            """INSERT OR IGNORE INTO messages
+                               (id, conversation_id, ordinal, role, content, sources_json, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                message_id,
+                                conversation_id,
+                                next_ordinal,
+                                role,
+                                content,
+                                self._serialize_sources(message),
+                                str(message.get("created_at", now)),
+                            ),
+                        )
+                        if cursor.rowcount:
+                            next_ordinal += 1
+
+                active_id = state.get("active_conversation_id")
+                active_row = None
+                if active_id in current_ids:
+                    active_row = connection.execute(
+                        "SELECT id FROM conversations WHERE id = ? AND browser_id = ?",
+                        (str(active_id), browser_id),
+                    ).fetchone()
+
+                if active_row is None:
+                    active_row = connection.execute(
+                        """SELECT id FROM conversations WHERE browser_id = ?
+                           ORDER BY updated_at DESC, created_at DESC LIMIT 1""",
+                        (browser_id,),
+                    ).fetchone()
+                persisted_active_id = active_row["id"] if active_row else None
+
+                connection.execute(
+                    """UPDATE browser_profiles
+                       SET active_conversation_id = ?, updated_at = ?
+                       WHERE browser_id = ?""",
+                    (persisted_active_id, now, browser_id),
+                )
+        except ConversationStoreError:
+            raise
+        except sqlite3.IntegrityError as exc:
+            raise ConversationStoreError("Conversation data failed database validation.") from exc
+        except sqlite3.Error as exc:
+            raise ConversationStoreError(
+                "Could not save this browser's conversation history."
+            ) from exc

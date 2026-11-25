@@ -29,6 +29,7 @@ def render_sidebar(
     persist: Callable[[], None] | None = None,
 ) -> tuple[str | None, str, int]:
     """Render navigation and return (document_id, document_label, retrieval_k)."""
+
     def save_changes() -> None:
         if persist is not None:
             persist()
@@ -66,11 +67,10 @@ def render_sidebar(
         try:
             documents = rag.list_documents()
             total_chunks = rag.count_chunks()
-        except Exception as exc:
+        except Exception:
             documents = []
             total_chunks = 0
-            st.error("Task 2 knowledge base could not be read.")
-            st.caption(str(exc))
+            st.error("Task 2 knowledge base could not be read. Check the application logs.")
 
         st.caption(f"{len(documents)} indexed document(s) · {total_chunks} chunk(s)")
         if not documents:
@@ -90,7 +90,10 @@ def render_sidebar(
             document_options = [None] + [str(doc["document_id"]) for doc in documents]
             labels = {None: "All indexed documents"}
             for document in documents:
-                labels[str(document["document_id"])] = _document_label(document, duplicate_names)
+                labels[str(document["document_id"])] = _document_label(
+                    document,
+                    duplicate_names,
+                )
 
         selected_id = st.selectbox(
             "Retrieval scope",

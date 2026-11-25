@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
+from typing import Any
 
 import streamlit as st
 from streamlit_cookies_controller import CookieController
@@ -36,6 +38,8 @@ st.set_page_config(
 )
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
+_SNAPSHOT_KEY = "_persisted_state_snapshot"
+
 
 def _request_uses_https() -> bool:
     """Set the Secure cookie flag when Streamlit is served over HTTPS."""
@@ -44,7 +48,18 @@ def _request_uses_https() -> bool:
         forwarded_proto = str(st.context.headers.get("X-Forwarded-Proto", ""))
     except Exception:
         request_url, forwarded_proto = "", ""
-    return request_url.lower().startswith("https://") or forwarded_proto.split(",")[0].strip().lower() == "https"
+    return (
+        request_url.lower().startswith("https://")
+        or forwarded_proto.split(",")[0].strip().lower() == "https"
+    )
+
+
+def _snapshot_state(state: Any) -> dict[str, Any]:
+    """Create this tab's own persistence baseline, not a merged DB snapshot."""
+    return {
+        "conversations": deepcopy(state.get("conversations", {})),
+        "active_conversation_id": state.get("active_conversation_id"),
+    }
 
 
 def _restore_and_persist_state() -> tuple[SQLiteConversationStore, str]:
@@ -60,25 +75,35 @@ def _restore_and_persist_state() -> tuple[SQLiteConversationStore, str]:
     )
     store = SQLiteConversationStore(CHAT_DATABASE_PATH)
 
-    # A browser refresh creates a new Streamlit session. Rehydrate that session
-    # from SQLite using only the browser ID verified from its signed cookie.
+    # A browser refresh starts a new Streamlit session. Hydrate both the visible
+    # state and a private per-tab baseline from the verified browser identity.
     if st.session_state.get("_browser_id") != browser_id:
         persisted = store.load_browser_state(browser_id)
         st.session_state["conversations"] = persisted["conversations"]
         st.session_state["active_conversation_id"] = persisted["active_conversation_id"]
         st.session_state["_browser_id"] = browser_id
+        st.session_state[_SNAPSHOT_KEY] = deepcopy(persisted)
+    elif not isinstance(st.session_state.get(_SNAPSHOT_KEY), dict):
+        # Defensive recovery for a hot reload or a session created by an older
+        # version that did not yet track per-tab persistence baselines.
+        st.session_state[_SNAPSHOT_KEY] = store.load_browser_state(browser_id)
 
     initialize_state(st.session_state)
-    store.save_browser_state(browser_id, st.session_state)
+    store.save_browser_state(
+        browser_id,
+        st.session_state,
+        previous_state=st.session_state[_SNAPSHOT_KEY],
+    )
+    st.session_state[_SNAPSHOT_KEY] = _snapshot_state(st.session_state)
     return store, browser_id
 
 
 try:
     store, browser_id = _restore_and_persist_state()
     rag = load_task2_services()
-except (Task2IntegrationError, ConversationStoreError, ValueError, OSError) as exc:
-    st.error("DocuMind Chat could not start.")
-    st.exception(exc)
+except (Task2IntegrationError, ConversationStoreError, ValueError, OSError):
+    logger.exception("DocuMind Chat startup failed.")
+    st.error("DocuMind Chat could not start. Please check the application configuration and logs.")
     st.markdown(
         "Check that `Task_04` is beside `Task_02`, install Task 2 and Task 4 dependencies, "
         "and configure `Task_02/.env`. Ensure the `Task_04/data` directory is writable. "
@@ -88,8 +113,21 @@ except (Task2IntegrationError, ConversationStoreError, ValueError, OSError) as e
 
 
 def persist_session() -> None:
-    """Write the current browser's complete chat state to its SQLite records."""
-    store.save_browser_state(browser_id, st.session_state)
+    """Save this tab's delta and advance only its own baseline.
+
+    Do not replace the baseline with a fresh merged database read here: doing
+    that would make messages written by other tabs look like deletions from
+    this tab's in-memory state on its next save.
+    """
+    previous = st.session_state.get(_SNAPSHOT_KEY)
+    if not isinstance(previous, dict):
+        previous = store.load_browser_state(browser_id)
+    store.save_browser_state(
+        browser_id,
+        st.session_state,
+        previous_state=previous,
+    )
+    st.session_state[_SNAPSHOT_KEY] = _snapshot_state(st.session_state)
 
 
 chat_service = ChatService(rag)
@@ -198,13 +236,12 @@ if question:
             persist_session()
             render_sources(turn.sources)
 
-        except Exception as exc:
+        except Exception:
             logger.exception("Chat turn failed.")
             safe_message = (
                 "I couldn't complete that response. Check the Gemini API configuration "
                 "and Task 2 integration, then try again."
             )
             st.error(safe_message)
-            st.caption(str(exc))
             append_message(st.session_state, "assistant", safe_message)
             persist_session()

@@ -1,3 +1,6 @@
 # Task 4 deliberately reuses Task 2's LangChain, Gemini, Chroma, embedding,
 # Streamlit, dotenv, and pytest dependencies. Install from this folder.
 -r ../Task_02/requirements.txt
+
+# Browser cookie used to retain a signed, anonymous browser identifier.
+streamlit-cookies-controller==0.0.4

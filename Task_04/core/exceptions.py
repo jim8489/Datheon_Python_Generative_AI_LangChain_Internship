@@ -11,3 +11,11 @@ class Task2IntegrationError(Task4Error):
 
 class ChatGenerationError(Task4Error):
     """Raised when Gemini cannot produce a streamed answer."""
+
+
+class ConversationStoreError(Task4Error):
+    """Raised when persistent conversation storage cannot be read or written."""
+
+
+class ConversationOwnershipError(ConversationStoreError):
+    """Raised when a conversation ID is not owned by the supplied browser identity."""

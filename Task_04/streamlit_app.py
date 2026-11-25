@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 import streamlit as st
+from streamlit_cookies_controller import CookieController
 
 from chatbot.chat_service import ChatService
 from chatbot.rag_adapter import load_task2_services
@@ -15,12 +16,14 @@ from conversation.manager import (
     get_recent_history,
     initialize_state,
 )
-from core.exceptions import Task2IntegrationError
+from core.browser_identity import get_or_create_browser_id, load_signing_key
+from core.exceptions import ConversationStoreError, Task2IntegrationError
 from core.logging_config import configure_logging
-from core.settings import MAX_QUESTION_CHARS, validate_settings
+from core.settings import CHAT_DATABASE_PATH, MAX_QUESTION_CHARS, validate_settings
 from frontend.components import render_message, render_sources
 from frontend.sidebar import render_sidebar
 from frontend.styles import APP_CSS
+from storage.sqlite_store import SQLiteConversationStore
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -33,23 +36,67 @@ st.set_page_config(
 )
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
-try:
+
+def _request_uses_https() -> bool:
+    """Set the Secure cookie flag when Streamlit is served over HTTPS."""
+    try:
+        request_url = str(st.context.url)
+        forwarded_proto = str(st.context.headers.get("X-Forwarded-Proto", ""))
+    except Exception:
+        request_url, forwarded_proto = "", ""
+    return request_url.lower().startswith("https://") or forwarded_proto.split(",")[0].strip().lower() == "https"
+
+
+def _restore_and_persist_state() -> tuple[SQLiteConversationStore, str]:
+    """Resolve browser identity, hydrate its chats, and ensure one chat exists."""
     validate_settings()
+    cookie_controller = CookieController(key="documind-cookie-controller")
+    signing_key = load_signing_key()
+    browser_id = get_or_create_browser_id(
+        cookie_controller,
+        signing_key,
+        secure=_request_uses_https(),
+        fallback_token=st.context.cookies.get("documind_browser"),
+    )
+    store = SQLiteConversationStore(CHAT_DATABASE_PATH)
+
+    # A browser refresh creates a new Streamlit session. Rehydrate that session
+    # from SQLite using only the browser ID verified from its signed cookie.
+    if st.session_state.get("_browser_id") != browser_id:
+        persisted = store.load_browser_state(browser_id)
+        st.session_state["conversations"] = persisted["conversations"]
+        st.session_state["active_conversation_id"] = persisted["active_conversation_id"]
+        st.session_state["_browser_id"] = browser_id
+
     initialize_state(st.session_state)
+    store.save_browser_state(browser_id, st.session_state)
+    return store, browser_id
+
+
+try:
+    store, browser_id = _restore_and_persist_state()
     rag = load_task2_services()
-except (Task2IntegrationError, ValueError) as exc:
+except (Task2IntegrationError, ConversationStoreError, ValueError, OSError) as exc:
     st.error("DocuMind Chat could not start.")
     st.exception(exc)
     st.markdown(
-        "Check that `Task_04` is beside `Task_02`, install Task 2's dependencies, "
-        "and configure `Task_02/.env`. See `Task_04/README.md` for setup instructions."
+        "Check that `Task_04` is beside `Task_02`, install Task 2 and Task 4 dependencies, "
+        "and configure `Task_02/.env`. Ensure the `Task_04/data` directory is writable. "
+        "See `Task_04/README.md` for setup instructions."
     )
     st.stop()
+
+
+def persist_session() -> None:
+    """Write the current browser's complete chat state to its SQLite records."""
+    store.save_browser_state(browser_id, st.session_state)
+
 
 chat_service = ChatService(rag)
 selected_document_id, selected_document_label, retrieval_k = render_sidebar(
     rag,
     st.session_state,
+    persist=persist_session,
 )
 
 conversation = get_active_conversation(st.session_state)
@@ -76,7 +123,10 @@ suggested_question = st.session_state.pop("_suggested_question", None)
 messages = get_messages(st.session_state)
 if not messages and not suggested_question:
     st.markdown("### Start a conversation")
-    st.write("Ask a question about the documents already indexed in Task 2. You can ask follow-up questions naturally; the retrieval query will be contextualized using this conversation.")
+    st.write(
+        "Ask a question about the documents already indexed in Task 2. You can ask "
+        "follow-up questions naturally; the retrieval query will be contextualized using this conversation."
+    )
     example_columns = st.columns(2)
     suggestions = [
         "What is the main topic of the indexed documents?",
@@ -104,9 +154,10 @@ if question:
     if not question:
         st.stop()
 
-    # Capture the prior conversation before appending the current question.
+    # Capture prior messages before appending the current user question.
     history = get_recent_history(st.session_state)
     append_message(st.session_state, "user", question)
+    persist_session()
 
     with st.chat_message("user", avatar="🧑‍💻"):
         st.markdown(question)
@@ -129,12 +180,7 @@ if question:
                     status_label = "Generating a grounded answer…"
                 else:
                     status_label = "No relevant passages found"
-
-                status.update(
-                    label=status_label,
-                    state="complete",
-                    expanded=False,
-                )
+                status.update(label=status_label, state="complete", expanded=False)
 
             answer = st.write_stream(turn.tokens)
             if not isinstance(answer, str):
@@ -149,6 +195,7 @@ if question:
                 answer,
                 sources=turn.sources,
             )
+            persist_session()
             render_sources(turn.sources)
 
         except Exception as exc:
@@ -160,3 +207,4 @@ if question:
             st.error(safe_message)
             st.caption(str(exc))
             append_message(st.session_state, "assistant", safe_message)
+            persist_session()

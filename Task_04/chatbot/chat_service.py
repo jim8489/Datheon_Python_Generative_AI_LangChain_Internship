@@ -1,8 +1,9 @@
-"""History-aware conversational orchestration over Task 2's RAG services."""
+"""History-aware conversational orchestration over Task 2's existing RAG services."""
 
 from __future__ import annotations
-import re
+
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -47,6 +48,7 @@ class PreparedTurn:
     has_context: bool
     is_conversational: bool = False
 
+
 class ChatService:
     """Coordinates follow-up rewriting, Task 2 retrieval, and Gemini streaming."""
 
@@ -69,16 +71,12 @@ class ChatService:
             if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
                 cleaned.append({"role": role, "content": content.strip()})
         return cleaned
+
     @staticmethod
     def _quick_reply(question: str) -> str | None:
         """Handle simple greetings without invoking document retrieval."""
-        normalized = re.sub(
-            r"[^\w\s']",
-            "",
-            question.casefold(),
-        )
+        normalized = re.sub(r"[^\w\s']", "", question.casefold())
         normalized = " ".join(normalized.split())
-
         replies = {
             "hi": "Hello! I'm DocuMind. What would you like to know about your indexed documents?",
             "hello": "Hello! Ask me anything about your indexed documents.",
@@ -92,7 +90,6 @@ class ChatService:
             "thanks": "You're welcome! Feel free to ask another question.",
             "thank you": "You're welcome! Feel free to ask another question.",
         }
-
         return replies.get(normalized)
 
     def contextualize_question(
@@ -120,7 +117,6 @@ class ChatService:
                 ),
             },
         ]
-
         try:
             response = self.rag.invoke_with_fallback(messages)
             rewritten = self.rag.extract_response_text(response.content).strip()
@@ -130,11 +126,7 @@ class ChatService:
                 return rewritten
             logger.warning("Query rewrite returned an empty or oversized query; using original question.")
         except Exception:
-            # Retrieval still gets a chance with the user's exact wording. The
-            # final generation call will report a provider/configuration failure
-            # if Gemini is unavailable altogether.
             logger.exception("Follow-up query contextualization failed; using original question.")
-
         return question.strip()
 
     def _build_answer_messages(
@@ -146,10 +138,7 @@ class ChatService:
     ) -> list[dict[str, str]]:
         previous_messages = self._clean_history(history)[-self.max_history_messages:]
         messages: list[dict[str, str]] = [
-            {
-                "role": "system",
-                "content": self.rag.system_prompt + _CONVERSATIONAL_RULES,
-            }
+            {"role": "system", "content": self.rag.system_prompt + _CONVERSATIONAL_RULES}
         ]
         messages.extend(
             {"role": item["role"], "content": item["content"]}
@@ -192,12 +181,9 @@ class ChatService:
     def _stream_with_fallback(self, messages: list[dict[str, str]]) -> Iterator[str]:
         """Stream from the primary model; retry fallback only before first text."""
         primary_name, fallback_name = self.rag.model_names
-        candidates: list[str | None] = []
-        for candidate in (None, fallback_name):
-            if candidate is None and not candidates:
-                candidates.append(None)
-            elif candidate and candidate != primary_name and candidate not in candidates:
-                candidates.append(candidate)
+        candidates: list[str | None] = [None]
+        if fallback_name and fallback_name != primary_name:
+            candidates.append(fallback_name)
 
         last_error: Exception | None = None
         for model_index, model_name in enumerate(candidates):
@@ -227,6 +213,52 @@ class ChatService:
             "Check the API key, model names, network connection, and provider quota."
         ) from last_error
 
+    @staticmethod
+    def _validate_citation_stream(
+        tokens: Iterator[str],
+        sources: list[dict[str, Any]],
+    ) -> Iterator[str]:
+        """Remove citation IDs not supplied by Task 2 without buffering the full answer."""
+        valid_ids = {
+            str(source.get("citation_id"))
+            for source in sources
+            if source.get("citation_id")
+        }
+        citation_pattern = re.compile(r"\[(S\d+)\]")
+        partial_pattern = re.compile(r"\[S\d*$")
+        buffer = ""
+
+        def flush(final: bool = False) -> Iterator[str]:
+            nonlocal buffer
+            while buffer:
+                match = citation_pattern.search(buffer)
+                if match:
+                    prefix = buffer[:match.start()]
+                    if prefix:
+                        yield prefix
+                    citation_id = match.group(1)
+                    if citation_id in valid_ids:
+                        yield match.group(0)
+                    buffer = buffer[match.end():]
+                    continue
+
+                partial = None if final else partial_pattern.search(buffer)
+                if partial:
+                    safe_text = buffer[:partial.start()]
+                    if safe_text:
+                        yield safe_text
+                    buffer = buffer[partial.start():]
+                    return
+
+                yield buffer
+                buffer = ""
+
+        for token in tokens:
+            if token:
+                buffer += token
+                yield from flush()
+        yield from flush(final=True)
+
     def prepare_turn(
         self,
         question: str,
@@ -240,7 +272,6 @@ class ChatService:
             raise ValueError("Question cannot be empty.")
 
         quick_reply = self._quick_reply(question)
-
         if quick_reply:
             return PreparedTurn(
                 sources=[],
@@ -250,28 +281,26 @@ class ChatService:
                 is_conversational=True,
             )
 
-        query = self.contextualize_question(question, history)        
+        query = self.contextualize_question(question, history)
         k = retrieval_k or self.rag.retrieval_k
         if k < 1:
             raise ValueError("Retrieval count must be greater than zero.")
 
         documents = self.rag.search(query=query, k=k, document_id=document_id)
         if not documents:
-            message = self.rag.insufficient_information
             return PreparedTurn(
                 sources=[],
                 retrieval_query=query,
-                tokens=iter((message,)),
+                tokens=iter((self.rag.insufficient_information,)),
                 has_context=False,
             )
 
         context, sources = self.rag.format_context(documents)
         if not context.strip():
-            message = self.rag.insufficient_information
             return PreparedTurn(
                 sources=[],
                 retrieval_query=query,
-                tokens=iter((message,)),
+                tokens=iter((self.rag.insufficient_information,)),
                 has_context=False,
             )
 
@@ -281,9 +310,11 @@ class ChatService:
             context=context,
             selected_document_label=document_label,
         )
+        raw_tokens = self._stream_with_fallback(messages)
+        validated_tokens = self._validate_citation_stream(raw_tokens, sources)
         return PreparedTurn(
             sources=sources,
             retrieval_query=query,
-            tokens=self._stream_with_fallback(messages),
+            tokens=validated_tokens,
             has_context=True,
         )

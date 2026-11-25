@@ -1,87 +1,71 @@
-# DocuMind Chat — Conversational RAG with Streaming
+# DocuMind Chat — Persistent Conversational RAG
 
-**Internship:** Datheon Python + Generative AI & LangChain Internship  
+**Internship:** Datheon Python + Generative AI & LangChain Internship
 **Task:** Task 04 — Interactive Full-Stack AI Chatbot with Streamlit
 
-DocuMind Chat turns the existing Task 02 DocuMind RAG pipeline into a multi-turn conversational application. It adds conversation history, session-state management, follow-up question contextualization, and token-by-token response streaming without copying or reimplementing Task 02's document ingestion, chunking, embedding, ChromaDB, retrieval, or source-formatting services.
+DocuMind Chat extends the existing Task 02 RAG pipeline with a conversational Streamlit interface. Task 4 reuses Task 2's document ingestion, chunking, embeddings, ChromaDB, retrieval, Gemini configuration, and source formatting. It adds follow-up-aware retrieval, token streaming, separate conversations, and durable SQLite chat history.
 
-## What Task 4 adds
+## What Task 4 provides
 
-- **Interactive chat UI:** Uses Streamlit's `st.chat_message` and `st.chat_input` components.
-- **Streaming output:** Streams LangChain Gemini chunks into the conversation with `st.write_stream`.
-- **Conversation history:** Maintains separate conversations and replays the active conversation when the app reruns.
-- **Session-state management:** Stores chats in `st.session_state`; each browser session has its own isolated conversation dictionary.
-- **Follow-up contextualization:** Rewrites context-dependent follow-up questions into standalone retrieval queries using recent conversation history.
-- **History-aware RAG prompting:** Supplies recent user/assistant messages alongside the current retrieved evidence to Gemini. Factual answers remain grounded in the retrieved document context.
-- **Document scope:** Allows retrieval across the Task 02 knowledge base or within one Task 02 document ID.
-- **Source inspection:** Shows the source filename, page, relevance score, and excerpt returned by Task 02's source formatter.
-- **Conversation controls:** Create, switch, clear, and delete conversations within the current browser session.
-- **Graceful model fallback:** Attempts Task 02's configured fallback Gemini model only if the primary stream fails before producing text. It never restarts after partial output, avoiding duplicated answers.
-
-## What Task 4 deliberately reuses
-
-Task 4 integrates with these existing Task 02 services:
-
-| Task 02 service | How Task 4 uses it |
-|---|---|
-| `app.services.vector_store.search_similar_documents()` | Retrieve relevant chunks using the rewritten follow-up query and optional document ID |
-| `app.services.rag_service.format_context()` | Format retrieved chunks and generate matching source records |
-| `app.services.rag_service.SYSTEM_PROMPT` | Preserve DocuMind's document-grounding and citation rules |
-| `app.services.rag_service.get_language_model()` | Create the configured Gemini chat model for streaming |
-| `app.services.rag_service.invoke_with_fallback()` | Contextualize follow-up questions using the configured primary/fallback models |
-| `app.services.rag_service.extract_response_text()` | Normalize the query-rewrite response |
-| `app.services.vector_store.list_indexed_documents()` | Populate the document-scope selector |
-
-Task 4 does **not** upload, parse, chunk, embed, or index documents. Those responsibilities remain in Task 02. Index documents from the Task 02 application first; Task 4 is the conversational interface over that same knowledge base.
+- Interactive chat using Streamlit's `st.chat_message` and `st.chat_input`.
+- Token-by-token model output through `st.write_stream`.
+- Multi-turn conversation history and contextualized follow-up questions.
+- Retrieval across all indexed documents or within one selected document.
+- Expandable source references with filename, page, relevance score, and excerpt.
+- Create, switch, clear, and delete conversation controls.
+- SQLite persistence: conversations and message sources survive refreshes and app restarts.
+- Anonymous browser-level isolation using an opaque, HMAC-signed browser identifier stored in a browser cookie.
+- Citation validation during streaming: only citation IDs returned by Task 2 are retained.
+- Primary-to-fallback model handling only before any output is emitted, preventing duplicate text after partial output.
 
 ## Architecture
 
 ```text
-User
+Browser
+  │
+  ├── Signed anonymous browser cookie
+  │      └── HMAC verification (server-side signing key)
   │
   ▼
-Streamlit chat interface
-(st.chat_message / st.chat_input)
+Streamlit UI + Conversation Manager
+  │
+  ├── Session State (current UI state)
   │
   ▼
-Session State conversation manager
-  ├── active conversation ID
-  ├── message history
-  └── independent conversations per browser session
+SQLite Conversation Store
+  ├── browser_profiles
+  ├── conversations
+  └── messages + serialized source references
   │
   ▼
-Task 4 chat orchestration
+Task 4 Chat Service
   ├── bounded history selection
   ├── follow-up question contextualization
-  └── history-aware prompt construction
+  ├── Task 2 retrieval adapter
+  ├── streaming citation validation
+  └── Gemini primary/fallback streaming
   │
   ▼
-Task 02 RAG services (reused, not copied)
+Task 02 RAG Services (reused, not copied)
   ├── search_similar_documents()
-  └── format_context()
-  │
-  ▼
-Task 02 Gemini model configuration
-  ├── primary model streaming
-  └── fallback model before first token only
-  │
-  ▼
-Streamlit st.write_stream()
-  │
-  ▼
-Assistant response + supporting source references
+  ├── format_context()
+  ├── get_language_model()
+  └── list_indexed_documents()
 ```
 
-### Follow-up question example
+### Important identity and privacy boundary
 
-1. User: “Summarize the main contribution of this paper.”
-2. Assistant answers using retrieved Task 02 document passages.
-3. User: “What are its limitations?”
-4. Task 4 sends the recent conversation to the contextualization model and rewrites the follow-up as a standalone retrieval query, such as “What limitations of the paper's proposed contribution are described?”
-5. Task 4 retrieves new evidence from Task 02's existing Chroma collection.
-6. Gemini receives the recent conversation plus the newly retrieved evidence. The final answer is streamed into the chat and its sources remain expandable below the message.
+This task uses **anonymous browser identity**, not user accounts. Each browser profile receives a random identifier in a signed cookie. The server verifies the signature before using that identifier to load chat history. Every database read and write is scoped to that browser identifier; a conversation ID alone is never treated as authorization.
 
-The rewritten query is used for retrieval; it does not replace the user's displayed question.
+This is suitable for demonstrating multi-visitor isolation in an internship MVP without adding a full authentication system. It is not equivalent to authenticated user identity:
+
+- Users in the same browser profile share that profile's chat history.
+- A user cannot automatically access the same chats from another device or browser profile.
+- Anyone who obtains and replays the browser cookie may act as that anonymous browser. Use proper authentication for accounts, sensitive information, or cross-device history.
+- The cookie controller is JavaScript-based, so the cookie is not `HttpOnly`. Serve deployments over HTTPS, keep dependencies updated, and do not put sensitive personal data in an anonymous chat.
+- Clearing browser cookies loses the browser's ability to retrieve its previous history. The old database records remain until removed through database maintenance.
+
+For an authenticated product, replace anonymous browser identity with a verified user ID from an authentication provider and keep the same owner-scoped database access pattern.
 
 ## Project structure
 
@@ -93,21 +77,27 @@ Task_04/
 │   └── chat_service.py
 ├── conversation/
 │   └── manager.py
+├── storage/
+│   └── sqlite_store.py
 ├── frontend/
 │   ├── components.py
 │   ├── sidebar.py
 │   └── styles.py
 ├── core/
+│   ├── browser_identity.py
 │   ├── settings.py
 │   ├── exceptions.py
 │   └── logging_config.py
 ├── tests/
+│   ├── test_browser_identity.py
 │   ├── test_chat_service.py
-│   └── test_conversation_manager.py
-├── .streamlit/
-│   └── config.toml
+│   ├── test_conversation_manager.py
+│   ├── test_rag_adapter.py
+│   └── test_storage.py
+├── .streamlit/config.toml
 ├── .env.example
 ├── .gitignore
+├── Dockerfile
 ├── requirements.txt
 └── README.md
 ```
@@ -122,60 +112,62 @@ Datheon_Python_Generative_AI_LangChain_Internship/
 ├── Task_02/
 │   ├── app/
 │   ├── data/
-│   ├── chroma_db/       # created locally by Task 02; not committed
+│   ├── chroma_db/       # created locally by Task 2; not committed
 │   ├── .env             # local Gemini configuration; not committed
 │   └── requirements.txt
 └── Task_04/
     ├── streamlit_app.py
+    ├── data/            # generated locally; ignored by Git
     └── ...
 ```
 
-Task 4's adapter adds the sibling `Task_02` directory to Python's import path and imports its existing `app.services` modules. The entry point is named `streamlit_app.py` intentionally: Task 2 already has a top-level Python package named `app`, so using another `app.py` entry point could create an ambiguous import.
+Task 4 imports Task 2's existing `app.services` modules. Its entry point is named `streamlit_app.py` because Task 2 already has a top-level Python package named `app`.
 
 ## Installation
 
-Use Python 3.11, consistent with the preceding internship tasks.
-
-From the repository root:
+Use Python 3.11, consistent with the preceding internship tasks. From the repository root:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-```
-
-Install Task 4's requirements from inside its folder. The requirements file includes Task 2's dependency list, so the shared LangChain, Gemini, Chroma, embedding, Streamlit, and test dependencies stay aligned:
-
-```bash
 cd Task_04
 pip install -r requirements.txt
 ```
 
+Task 4's requirements include Task 2's dependency file and the cookie controller used for browser identity. Do not create a second vector database or a second Gemini key for Task 4.
+
 ## Configuration
 
-Task 4 reuses the Gemini API key, model names, embedding configuration, Chroma directory, and collection configured for Task 2. **Do not create a second API key or a second vector database for Task 4.**
+1. Make sure `Task_02/.env` exists and has the working Gemini configuration used by Task 2. Refer to `Task_02/.env.example`.
+2. From `Task_04`, create the local settings file:
 
-1. Make sure `Task_02/.env` exists and contains the valid configuration used by Task 2. At minimum, it should include the Gemini API key and model configuration. See `Task_02/.env.example`.
-2. In `Task_04`, create the local chat settings file:
+   ```bash
+   cp .env.example .env
+   ```
+
+3. The default `TASK2_PATH=../Task_02` is correct when both tasks are sibling directories.
+4. The default chat database is `Task_04/data/conversations.sqlite3`. Task 4 creates the directory and database automatically.
+5. Task 4 creates `Task_04/data/.browser_signing_key` automatically when `SESSION_SIGNING_KEY` is not configured. Both the database and this signing key are excluded from Git.
+
+For a stable deployment, set `SESSION_SIGNING_KEY` to a randomly generated secret of at least 32 bytes and preserve it across restarts. Generate one with:
 
 ```bash
-cp .env.example .env
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-3. The default `TASK2_PATH=../Task_02` is correct when the folders are siblings. Change it only if your folder layout differs.
-
-Task 2's own `app/config.py` loads `Task_02/.env` and resolves its persistent Chroma directory relative to `Task_02`. Task 4 reads the same settings by importing Task 2's services.
+Keep the key private. Rotating or losing it invalidates existing browser cookies, so users receive new browser identities and cannot retrieve their earlier histories with the old cookie.
 
 ## Prepare the knowledge base
 
-If Task 2 already has indexed documents in its local `Task_02/chroma_db` directory, no re-indexing is required. Otherwise:
+If Task 2 already has indexed documents in `Task_02/chroma_db`, no re-indexing is required. Otherwise, start Task 2 from its directory:
 
 ```bash
 cd ../Task_02
 PYTHONPATH=. python -m streamlit run app/ui.py
 ```
 
-Upload and index your PDF/TXT files in Task 2, then stop that Streamlit process. Return to Task 4. Both applications use the same Task 02 Chroma collection and embedding configuration. Avoid running both applications as simultaneous writers to the same local Chroma directory; Task 4 is read-only with respect to document indexing.
+Upload and index PDF/TXT files in Task 2, then stop that Streamlit process and return to Task 4. Both apps use the same Task 2 Chroma collection and embedding configuration. Avoid running both apps as simultaneous writers to the same local Chroma directory; Task 4 only reads from it.
 
 ## Run Task 4
 
@@ -187,105 +179,102 @@ streamlit run streamlit_app.py
 
 Open the local URL shown by Streamlit, normally `http://localhost:8501`.
 
-### Typical workflow
+Typical workflow:
 
-1. Create a new conversation from the sidebar.
-2. Select **All indexed documents** or a specific Task 02 document.
-3. Ask a question about the indexed knowledge base.
-4. Watch the answer stream into the chat.
-5. Expand **Supporting sources** to inspect the retrieved passages.
-6. Ask a follow-up naturally, such as “Can you explain that in more detail?” or “What limitations does it mention?”
-7. Switch between conversations, clear the active conversation, or delete it from the sidebar.
+1. Create a conversation from the sidebar.
+2. Select **All indexed documents** or one document.
+3. Ask a question and watch the response stream.
+4. Expand **Supporting sources** to inspect the retrieved passages.
+5. Ask a follow-up such as “What are its limitations?”
+6. Switch, clear, or delete conversations. The changes are saved to SQLite.
+7. Refresh the browser. The same browser profile should see its prior conversation list and active conversation restored.
 
-## Session state and memory behavior
+## Persistence and isolation behavior
 
-- Conversations live in `st.session_state` and are scoped to the active browser session.
-- Each browser session has a separate conversation dictionary and active conversation ID; one session does not load another session's messages.
-- Multiple conversations can be created and switched within one browser session.
-- Conversation messages are held in application memory. They are not a permanent chat archive and can be lost when the session ends or the Streamlit process restarts.
-- Only the most recent `MAX_HISTORY_MESSAGES` messages are included in each generation prompt. This bounds context growth while retaining recent conversational context.
-- Document vectors are persisted by Task 02 in ChromaDB and are separate from chat history.
-
-This is session-level conversation memory as requested by the assignment. Persistent cross-device chat history would require an authenticated identity and a durable chat database, which are outside this task's stated scope.
-
-## Streaming and error handling
-
-The final answer uses Task 2's configured Gemini model through LangChain's `.stream()` method and Streamlit's `st.write_stream()` renderer. If the primary model fails before producing text, Task 4 tries the configured fallback model. If a stream fails after partial output, Task 4 does not restart with a fallback because that would duplicate or contradict the already displayed answer; it displays an interruption notice instead.
-
-If follow-up contextualization fails, Task 4 logs the error and falls back to the user's original question for retrieval. If the final model generation fails, the UI displays a safe error message without exposing credentials.
+- `st.session_state` is used for the active Streamlit interaction, not as the long-term database.
+- SQLite persists conversation metadata, ordered messages, source references, and the active conversation ID.
+- The signed cookie identifies one anonymous browser profile. The identifier is validated before any history is loaded.
+- Queries use the browser ID as an ownership filter. Guessing another conversation ID is not sufficient to read or change it.
+- The default maximum is 20 conversations per browser profile. When the limit is exceeded, the least recently active conversations are removed.
+- The default browser cookie lifetime is 365 days. `BROWSER_COOKIE_TTL_DAYS` can change this value.
+- Only the most recent `MAX_HISTORY_MESSAGES` are added to each generation prompt. The full transcript remains stored for display.
+- SQLite is appropriate for a lightweight, single-instance internship deployment. For multiple application replicas or high write concurrency, move this storage interface to a managed database such as PostgreSQL.
 
 ## Configuration reference
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `TASK2_PATH` | `../Task_02` | Location of the existing Task 02 package |
-| `MAX_HISTORY_MESSAGES` | `12` | Number of recent messages included in generation context |
-| `MAX_CONVERSATIONS` | `20` | Maximum conversation count held in one browser session |
+| `CHAT_DATABASE_PATH` | `data/conversations.sqlite3` | SQLite database path; relative paths resolve from Task 04 |
+| `MAX_HISTORY_MESSAGES` | `12` | Recent messages included in the generation context |
+| `MAX_CONVERSATIONS` | `20` | Maximum conversations retained per browser |
 | `DEFAULT_RETRIEVAL_K` | `6` | Fallback retrieval count if Task 2 does not expose one |
 | `MAX_QUESTION_CHARS` | `4000` | Maximum submitted question length |
 | `QUERY_REWRITE_ENABLED` | `true` | Contextualize follow-up questions before retrieval |
+| `BROWSER_COOKIE_TTL_DAYS` | `365` | Browser identity cookie lifetime |
+| `SESSION_SIGNING_KEY` | auto-generated local key | Optional deployment key used to sign browser identities |
 | `LOG_LEVEL` | `INFO` | Application logging verbosity |
 
-Gemini, embedding, and Chroma variables remain in `Task_02/.env` and are documented in `Task_02/.env.example`.
+Gemini, embedding, and Chroma settings remain in `Task_02/.env` and are documented in `Task_02/.env.example`.
 
 ## Tests
 
-Run tests from `Task_04`:
+Run from `Task_04`:
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-The Task 4 unit tests use fake RAG services and model streams, so the suite does not require a Gemini API request, downloaded embedding model, or populated Chroma database. Tests cover:
+The unit tests use fake RAG services and model streams. They do not make Gemini API calls or require a populated Chroma database. Coverage includes:
 
-- Session initialization and session-scoped conversation IDs.
-- Conversation creation, switching, title generation, history limits, clearing, and deletion.
-- Follow-up question contextualization.
-- Task 2 document-scope forwarding and retrieved-context prompt construction.
-- No-context behavior and insufficient-information response.
-- Token extraction from LangChain stream chunks.
-- Primary-to-fallback streaming before the first token.
-- No fallback restart after partial output.
-- Clear failure behavior when all model attempts fail.
+- Conversation creation, switching, history limits, clearing, deleting, and malformed-state recovery.
+- Signed browser token creation, signature verification, expiry, cookie reuse, and key persistence.
+- SQLite round trips, source preservation, active-conversation restoration, deletion synchronization, and browser-to-browser isolation.
+- Rejection of attempts to claim another browser's conversation record.
+- Follow-up question contextualization, document-scope forwarding, context construction, and greeting behavior.
+- Token extraction, valid/invalid citation filtering across chunk boundaries, and model fallback behavior.
 
-Run Task 2's test suite separately from its own directory:
+Run Task 2's tests separately from its own directory:
 
 ```bash
 cd ../Task_02
 PYTHONPATH=. python -m pytest -v
 ```
 
-## Optional Docker deployment
+## Docker deployment
 
-Build from the internship repository root so the image can include the Task 02 service code:
+Build from the internship repository root. The ZIP also includes a root-level `.dockerignore`; place it at the repository root beside `Task_02` and `Task_04`.
 
 ```bash
 docker build -f Task_04/Dockerfile -t documind-task04 .
 ```
 
-Run using Task 02's environment settings and persistent Chroma directory:
+Create the persistent data directory and run the container:
 
 ```bash
+mkdir -p Task_04/data
 docker run --rm -p 8501:8501 \
   --env-file Task_02/.env \
   -e TASK2_PATH=/app/Task_02 \
   -v "$(pwd)/Task_02/chroma_db:/app/Task_02/chroma_db" \
+  -v "$(pwd)/Task_04/data:/app/Task_04/data" \
   documind-task04
 ```
 
-The first Docker build installs the dependencies declared by Task 02, including its local embedding stack. The Chroma volume keeps the indexed knowledge base available across container restarts.
+The Chroma volume keeps Task 2's knowledge base available, while the Task 4 data volume preserves conversations and the automatically generated browser signing key across container restarts. Do not run multiple replicas against a local SQLite file shared over a network filesystem.
 
 ## Security and operational notes
 
-- Keep `Task_02/.env` and `Task_04/.env` out of Git; both `.gitignore` files exclude them.
-- Task 4 does not persist original chat transcripts to disk or expose chat state across browser sessions.
-- The Task 02 knowledge base is shared by applications that point to the same local Chroma collection. Do not put private documents in a shared deployment without adding authentication and document-level authorization.
+- Keep both `Task_02/.env` and `Task_04/.env` out of Git.
+- Keep the SQLite database and browser signing key out of Git and Docker build contexts.
+- Serve remote deployments over HTTPS. The cookie is marked `Secure` when the request URL or forwarded protocol indicates HTTPS, and uses `SameSite=Strict`.
+- Browser identity is anonymous and not suitable for regulated or highly sensitive information. Add authentication and authorization for a production service.
 - Retrieved document text is treated as untrusted evidence, not as system instructions.
-- Source citations are evidence pointers to retrieved chunks. Review cited passages for important decisions.
-- The first use of Task 2 may download the Hugging Face embedding model if it is not already cached.
+- Citation filtering removes references that were not present in the retrieved source list. It does not prove that a cited passage semantically supports every claim.
+- The first use of Task 2 may download its configured embedding model if it is not already cached.
 
 ---
 
-**Task:** Task 04 — Interactive Full-Stack AI Chatbot with Streamlit  
-**Pipeline:** Task 02 DocuMind RAG, reused through its existing service interface  
-**Primary additions:** Streaming token output, conversation history, follow-up-aware retrieval, and explicit session-state management
+**Task:** Task 04 — Conversational AI Chatbot with Streamlit
+**RAG pipeline:** Task 02 DocuMind, reused through its service interface
+**Primary additions:** streaming chat, history-aware retrieval, browser-isolated SQLite persistence, and source-aware responses

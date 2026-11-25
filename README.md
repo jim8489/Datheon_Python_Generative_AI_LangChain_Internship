@@ -1,77 +1,59 @@
 # Datheon Python + Generative AI & LangChain Internship
 
-This repository contains my practical projects and task submissions for the Datheon Python + Generative AI & LangChain Internship.
+This repository contains practical task implementations for the Datheon Python + Generative AI & LangChain Internship. The projects cover Python application development, structured LLM extraction, retrieval-augmented generation, conversational AI, and integration of existing services into user-facing applications.
 
-The projects focus on Python development, Generative AI integration, prompt engineering, structured LLM applications, and building practical AI-powered solutions.
-
-## Repository Structure
+## Repository structure
 
 ```text
-Datheon_Python_+_Generative_AI_&_LangChain_Internship/
-│
-├── Task_01/
-│   ├── app/
-│   ├── examples/
-│   ├── tests/
-│   ├── outputs/
-│   ├── requirements.txt
-│   └── README.md
-│
-├── .gitignore
+Datheon_Python_Generative_AI_LangChain_Internship/
+├── Task_01/    # Structured LLM Prompt Pipeline & JSON Extractor
+├── Task_02/    # DocuMind document-based question answering with RAG
+├── Task_04/    # Persistent conversational RAG chatbot with Streamlit
+├── .dockerignore
 └── README.md
 ```
 
-## Completed Tasks
+Each task has its own README, dependency file, configuration example, and tests where applicable.
+
+## Completed tasks
 
 ### Task 01 — Structured LLM Prompt Pipeline & JSON Extractor
 
 A Python application that extracts structured information from resumes and invoices using Google's Gemini API.
 
-**Key features:**
-- Gemini API integration using the Google Gen AI SDK.
-- Parameterized prompt templates using Jinja2.
-- Few-shot prompting with extraction examples.
-- Structured JSON generation.
-- Pydantic schema validation.
-- Automatic retry and fallback model handling.
-- TXT and text-based PDF document support.
-- Automated tests using Pytest and mocked API responses.
+**Key features:** Gemini API integration, Jinja2 prompt templates, few-shot prompting, Pydantic schema validation, retry/fallback handling, PDF/TXT support, and automated tests.
 
-**Technologies:** Python, Google Gemini API, Pydantic, Jinja2, PyPDF, python-dotenv, Pytest.
+See [Task 01 README](Task_01/README.md).
 
-**Test status:** 10 automated tests passed.
+### Task 02 — DocuMind: Document-Based Question Answering with RAG
 
-See [Task 01 README](Task_01/README.md) for installation, configuration, architecture, and usage instructions.
+A Streamlit application that ingests PDF and TXT documents, chunks their contents, creates Hugging Face embeddings, stores vectors in ChromaDB, and generates context-grounded answers with Gemini. It supports document-specific retrieval and supporting source references.
 
-## Technologies and Tools
+**Technologies:** Python, LangChain, Google Gemini, Sentence Transformers, ChromaDB, PyPDF, Streamlit, Pytest.
 
-- Python
-- Generative AI and LLM APIs
-- Prompt Engineering
-- LangChain (for applicable tasks)
-- Pydantic
-- REST APIs
-- Pytest
-- Git and GitHub
+See [Task 02 README](Task_02/README.md).
 
-## Running a Task
+### Task 04 — DocuMind Chat: Persistent Conversational RAG
 
-Each task has its own folder and README containing its dependencies, setup instructions, and execution steps.
+A conversational layer built on top of Task 02's existing RAG services. It adds streaming responses, follow-up question contextualization, conversation management, source inspection, and SQLite persistence. Anonymous browser identities are signed and verified to isolate each browser profile's chat history without introducing an account system.
 
-For example, to run Task 01:
+**Technologies:** Python, Streamlit, LangChain, Google Gemini, SQLite, ChromaDB, Pytest.
 
-```bash
-cd Task_01
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+See [Task 04 README](Task_04/README.md).
 
-Configure the required environment variables using the task's `.env.example` file, then follow the task-specific README.
+## Running a task
+
+Each task is self-contained within its own folder. Create and activate a Python virtual environment, install that task's requirements, configure its `.env` using the provided `.env.example`, and follow its README.
+
+Task 04 deliberately reuses Task 02. Keep `Task_02` and `Task_04` as sibling directories and configure the Gemini key in `Task_02/.env`.
+
+## Tests
+
+Run tests from the relevant task directory, using the commands documented in its README. Task 04 tests use fake RAG/model objects and a temporary SQLite database, so they do not require live Gemini requests or a populated Chroma collection.
 
 ## Security
 
-API keys and environment-specific configuration files are excluded from version control. Never commit real API credentials.
+Never commit real API credentials, environment files, local SQLite databases, browser signing keys, or Chroma data. The `.gitignore` and root `.dockerignore` files exclude local secrets and generated data from source control and Docker build contexts.
 
 ## Internship
 

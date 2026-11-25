@@ -9,3 +9,7 @@ htmlcov/
 .DS_Store
 .venv/
 venv/
+data/
+*.sqlite
+*.sqlite3
+*.db

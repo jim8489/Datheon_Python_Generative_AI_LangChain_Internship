@@ -5,18 +5,24 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    TASK2_PATH=/app/Task_02
+    TASK2_PATH=/app/Task_02 \
+    CHAT_DATABASE_PATH=/app/Task_04/data/conversations.sqlite3
 
 WORKDIR /app
 
+# Copy both requirements files first so Docker can cache the dependency layer.
 COPY Task_02/requirements.txt /app/Task_02/requirements.txt
+COPY Task_04/requirements.txt /app/Task_04/requirements.txt
+WORKDIR /app/Task_04
 RUN python -m pip install --upgrade pip \
-    && python -m pip install -r /app/Task_02/requirements.txt
+    && python -m pip install -r requirements.txt
 
+WORKDIR /app
 COPY Task_02/app /app/Task_02/app
 COPY Task_04 /app/Task_04
 
 WORKDIR /app/Task_04
+RUN mkdir -p /app/Task_04/data
 EXPOSE 8501
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

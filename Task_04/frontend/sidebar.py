@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import streamlit as st
 
@@ -23,8 +23,16 @@ def _document_label(document: dict[str, Any], duplicate_names: set[str]) -> str:
     return filename
 
 
-def render_sidebar(rag: Any, state: Any) -> tuple[str | None, str, int]:
+def render_sidebar(
+    rag: Any,
+    state: Any,
+    persist: Callable[[], None] | None = None,
+) -> tuple[str | None, str, int]:
     """Render navigation and return (document_id, document_label, retrieval_k)."""
+    def save_changes() -> None:
+        if persist is not None:
+            persist()
+
     with st.sidebar:
         st.markdown("## ✦ DocuMind")
         st.caption("Conversational document intelligence")
@@ -32,6 +40,7 @@ def render_sidebar(rag: Any, state: Any) -> tuple[str | None, str, int]:
 
         if st.button("＋  New conversation", use_container_width=True, type="primary"):
             create_conversation(state)
+            save_changes()
             st.rerun()
 
         st.markdown("**Your conversations**")
@@ -49,6 +58,7 @@ def render_sidebar(rag: Any, state: Any) -> tuple[str | None, str, int]:
                 type="secondary" if conversation_id != active_id else "tertiary",
             ):
                 set_active_conversation(state, conversation_id)
+                save_changes()
                 st.rerun()
 
         st.divider()
@@ -103,15 +113,18 @@ def render_sidebar(rag: Any, state: Any) -> tuple[str | None, str, int]:
         with st.expander("Conversation controls"):
             if st.button("Clear current conversation", use_container_width=True):
                 clear_active_conversation(state)
+                save_changes()
                 st.rerun()
             if st.button("Delete current conversation", use_container_width=True):
                 delete_active_conversation(state)
+                save_changes()
                 st.rerun()
 
         st.divider()
         st.markdown(
-            '<p class="small-muted">Chat history is isolated to this browser session. '
-            'Document indexing remains managed by Task 2.</p>',
+            '<p class="small-muted">Conversation history is saved for this browser. '
+            'Other browser profiles receive separate chat histories. Document indexing '
+            'remains managed by Task 2.</p>',
             unsafe_allow_html=True,
         )
 

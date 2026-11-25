@@ -1,7 +1,8 @@
-"""Session-scoped conversation lifecycle and history helpers.
+"""In-memory conversation lifecycle helpers used by the Streamlit UI and tests.
 
-This module deliberately has no Streamlit dependency, making state behavior
-straightforward to test with ordinary dictionaries.
+Persistence is handled separately by ``storage.sqlite_store``. Keeping this
+module independent from Streamlit and SQLite makes its state transitions easy
+ to test and allows the same manager to be used with another storage backend.
 """
 
 from __future__ import annotations
@@ -32,13 +33,12 @@ def _new_conversation() -> dict[str, Any]:
 
 
 def initialize_state(state: State) -> None:
-    """Initialize a fresh browser session without sharing state with others."""
+    """Initialize a session and repair malformed persisted/in-memory records."""
     conversations = state.get("conversations")
     if not isinstance(conversations, dict):
         conversations = {}
         state["conversations"] = conversations
 
-    # Discard malformed conversation records before validating the active ID.
     for conversation_id, conversation in list(conversations.items()):
         if not isinstance(conversation, dict):
             del conversations[conversation_id]
@@ -53,13 +53,20 @@ def initialize_state(state: State) -> None:
 
     active_id = state.get("active_conversation_id")
     if not conversations or active_id not in conversations:
-        conversation = _new_conversation()
-        conversations[conversation["id"]] = conversation
-        state["active_conversation_id"] = conversation["id"]
+        if conversations:
+            active_id = max(
+                conversations,
+                key=lambda key: conversations[key].get("updated_at", ""),
+            )
+            state["active_conversation_id"] = active_id
+        else:
+            conversation = _new_conversation()
+            conversations[conversation["id"]] = conversation
+            state["active_conversation_id"] = conversation["id"]
 
 
 def create_conversation(state: State) -> str:
-    """Create and activate a new conversation; enforce a session chat limit."""
+    """Create and activate a conversation; enforce the per-browser chat limit."""
     if not isinstance(state.get("conversations"), dict) or not state.get("conversations"):
         state["conversations"] = {}
         conversation = _new_conversation()
@@ -86,7 +93,7 @@ def create_conversation(state: State) -> str:
 def set_active_conversation(state: State, conversation_id: str) -> None:
     initialize_state(state)
     if conversation_id not in state["conversations"]:
-        raise KeyError("The requested conversation does not exist in this session.")
+        raise KeyError("The requested conversation does not exist in this browser.")
     state["active_conversation_id"] = conversation_id
 
 
